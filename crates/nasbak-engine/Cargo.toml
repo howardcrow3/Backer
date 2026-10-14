@@ -1,0 +1,17 @@
+[package]
+name = "nasbak-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nasbak-core.workspace = true
+nasbak-store.workspace = true
+nasbak-connector.workspace = true
+blake3.workspace = true
+walkdir.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

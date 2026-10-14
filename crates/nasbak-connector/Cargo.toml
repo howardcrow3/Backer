@@ -1,0 +1,13 @@
+[package]
+name = "nasbak-connector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nasbak-core.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

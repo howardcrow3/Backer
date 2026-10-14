@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>File Backup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <nav aria-label="Sections">
+    <a href="#jobs" data-v="jobs">Jobs</a>
+    <a href="#deleted" data-v="deleted">Deleted files <span id="badge" class="badge" hidden></span></a>
+    <a href="#settings" data-v="settings">Settings</a>
+    <div class="grow"></div>
+    <div id="agent" class="agent">Checking…</div>
+  </nav>
+  <main id="main"></main>
+</div>
+<dialog id="dlg"></dialog>
+<script src="app.js"></script>
+</body>
+</html>
