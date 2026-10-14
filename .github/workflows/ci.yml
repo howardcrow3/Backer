@@ -1,5 +1,8 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 jobs:
   test:
     strategy:
@@ -14,13 +17,28 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: ./scripts/check-crate-graph.sh
-  app:
+  dmg:
+    # Builds the installable app for Apple silicon. Unsigned (ad hoc), so first launch needs right-click > Open.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with: { workspaces: ". -> target\napp/src-tauri -> target" }
       - run: cargo build --release -p nasbak-agent
+      - name: Bundle the agent next to the app
+        run: |
+          mkdir -p app/src-tauri/binaries
+          cp target/release/nasbak-agent app/src-tauri/binaries/nasbak-agent-aarch64-apple-darwin
       - run: cargo install tauri-cli --version "^2" --locked
       - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
-      - run: cd app/src-tauri && cargo tauri build --no-bundle
+      - run: cd app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+      - name: Collect
+        run: |
+          mkdir out
+          cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/ || cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: File-Backup-macOS-arm64-dmg
+          path: out/*.dmg
