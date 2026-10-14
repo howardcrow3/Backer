@@ -22,5 +22,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p nasbak-agent
       - run: cargo install tauri-cli --version "^2" --locked
-      - run: cd app/src-tauri && cargo tauri icon ../icon-source.png || true
+      - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
       - run: cd app/src-tauri && cargo tauri build --no-bundle
