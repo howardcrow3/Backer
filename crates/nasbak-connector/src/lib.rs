@@ -49,14 +49,15 @@ fn cerr(e: impl std::fmt::Display) -> Error {
 
 /// Reject absolute paths and `..` so a bad relative path cannot escape the root.
 fn safe_rel(rel: &str) -> Result<PathBuf> {
-    let p = Path::new(rel);
-    for c in p.components() {
+    // Rebuilt component by component so separators are native (backslashes on Windows).
+    let mut out = PathBuf::new();
+    for c in Path::new(rel).components() {
         match c {
-            Component::Normal(_) => {}
+            Component::Normal(n) => out.push(n),
             _ => return Err(Error::Invalid(format!("unsafe path: {rel}"))),
         }
     }
-    Ok(p.to_path_buf())
+    Ok(out)
 }
 
 impl MountedConnector {
@@ -71,8 +72,25 @@ impl MountedConnector {
         fs::write(self.root.join(DEST_MARKER), b"nasbak destination\n").map_err(cerr)
     }
     fn full(&self, rel: &str) -> Result<PathBuf> {
-        Ok(self.root.join(safe_rel(rel)?))
+        Ok(long_path(self.root.join(safe_rel(rel)?)))
     }
+}
+
+/// Windows: use the `\\?\` form so paths over 260 characters work. `\\server\share` becomes `\\?\UNC\server\share`.
+#[cfg(windows)]
+fn long_path(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy().to_string();
+    if s.starts_with(r"\\?\") || !p.is_absolute() {
+        return p;
+    }
+    match s.strip_prefix(r"\\") {
+        Some(unc) => PathBuf::from(format!(r"\\?\UNC\{unc}")),
+        None => PathBuf::from(format!(r"\\?\{s}")),
+    }
+}
+#[cfg(not(windows))]
+fn long_path(p: PathBuf) -> PathBuf {
+    p
 }
 
 pub fn temp_name(run: i64, seq: u64) -> String {
@@ -236,6 +254,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = MountedConnector::new(d.path());
         assert!(matches!(c.check_ready(), Err(Error::DestinationNotReady(_))));
+    }
+
+    #[test]
+    fn nested_relative_paths_work_with_forward_slashes() {
+        let (_d, c) = setup();
+        let src = tempfile::NamedTempFile::new().unwrap();
+        fs::write(src.path(), b"x").unwrap();
+        c.put_file(src.path(), "a/b/c/d.txt", 1, 1).unwrap();
+        assert!(c.stat("a/b/c/d.txt").unwrap().is_some());
     }
 
     #[test]

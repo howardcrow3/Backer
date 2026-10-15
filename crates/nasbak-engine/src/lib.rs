@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
-pub const DEFAULT_EXCLUDES: &[&str] = &[".DS_Store", ".localized", ".Trashes", ".fseventsd", ".Spotlight-V100", ".TemporaryItems"];
+pub const DEFAULT_EXCLUDES: &[&str] = &[".DS_Store", ".localized", ".Trashes", ".fseventsd", ".Spotlight-V100", ".TemporaryItems",
+    "Thumbs.db", "desktop.ini", "$RECYCLE.BIN", "System Volume Information"];
 
 pub trait Progress {
     fn update(&self, _stats: &RunStats) {}
@@ -87,7 +88,7 @@ pub fn run_job(
             }
             stats.scanned += 1;
             let rel = match entry.path().strip_prefix(root) {
-                Ok(r) => r.to_string_lossy().to_string(),
+                Ok(r) => r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
                 Err(_) => continue,
             };
             let dest_path = format!("{}/{}", pair.dest, nfc(&rel));

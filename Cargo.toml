@@ -20,6 +20,8 @@ walkdir = "2"
 unicode-normalization = "0.1"
 tempfile = "3"
 libc = "0.2"
+getrandom = "0.3"
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 nasbak-core = { path = "crates/nasbak-core" }
 nasbak-store = { path = "crates/nasbak-store" }

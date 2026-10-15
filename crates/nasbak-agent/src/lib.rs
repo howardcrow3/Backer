@@ -1,5 +1,6 @@
 //! The background agent: owns schedules, runs jobs, serves the app (ui.sock) and assistants (mcp.sock).
 pub mod approvals;
+pub mod ipc;
 pub mod server;
 pub mod platform;
 
@@ -89,6 +90,7 @@ impl Agent {
     fn spawn_run(self: &Arc<Self>, job: Job, cancel: Arc<AtomicBool>) {
         let me = self.clone();
         let work = move || {
+            let _awake = platform::AwakeGuard::new();
             if let Ok(store) = me.store() {
                 let conn = Agent::connector_for(&job);
                 let _ = run_job(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress);

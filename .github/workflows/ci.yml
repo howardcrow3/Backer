@@ -7,7 +7,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [macos-14, ubuntu-latest]   # macos-14 is Apple silicon
+        os: [macos-14, ubuntu-latest, windows-latest]   # macos-14 is Apple silicon
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +17,7 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: ./scripts/check-crate-graph.sh
+        shell: bash
   dmg:
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-14
@@ -78,3 +79,27 @@ jobs:
         with:
           name: File-Backup-macOS-arm64-dmg
           path: out/*.dmg
+
+  windows:
+    # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - run: cargo build --release -p nasbak-agent
+      - name: Bundle the agent next to the app
+        shell: bash
+        run: |
+          mkdir -p app/src-tauri/binaries
+          cp target/release/nasbak-agent.exe app/src-tauri/binaries/nasbak-agent-x86_64-pc-windows-msvc.exe
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: cargo tauri icon ../icon-source.png
+        working-directory: app/src-tauri
+      - run: cargo tauri build --bundles nsis
+        working-directory: app/src-tauri
+      - uses: actions/upload-artifact@v4
+        with:
+          name: File-Backup-Windows-x64-installer
+          path: app/src-tauri/target/release/bundle/nsis/*.exe

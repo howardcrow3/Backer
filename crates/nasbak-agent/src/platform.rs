@@ -1,11 +1,15 @@
 //! OS-specific helpers. macOS is the target; the Linux branches exist so the agent builds and tests in CI.
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Child;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(unix)]
 /// Peer's user id. Connections from other users are always refused.
 pub fn peer_uid(s: &UnixStream) -> Option<u32> {
     #[cfg(target_os = "macos")]
@@ -22,6 +26,7 @@ pub fn peer_uid(s: &UnixStream) -> Option<u32> {
     }
 }
 
+#[cfg(unix)]
 pub fn peer_pid(s: &UnixStream) -> Option<i32> {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -40,43 +45,57 @@ pub fn peer_pid(s: &UnixStream) -> Option<i32> {
     }
 }
 
+#[cfg(unix)]
 pub fn my_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Stable identity of the program on the other end of the socket, and a display name.
-/// macOS: the code-signing designated requirement (changes if the program is not signed by the same developer).
-/// Unsigned programs get an identity of "unsigned:<path>" and can still be approved by the user.
-pub fn client_identity(pid: i32) -> (String, String) {
+/// Stable identity of the program on the other end of the connection, and a display name.
+/// macOS: the code-signing designated requirement (pins the signer, not just the path).
+/// Linux (development): the executable path. Windows, or when the OS cannot tell us the process:
+/// one shared "unverified" identity, so approving it approves every local program that holds the
+/// connection token. Authenticode-based identity for Windows is future work.
+pub fn client_identity(pid: Option<i32>) -> (String, String) {
+    let unknown = || ("unverified-client".to_string(), "unknown program".to_string());
+    let Some(pid) = pid else { return unknown() };
     #[cfg(target_os = "macos")]
     {
         let mut buf = [0u8; 4096];
         let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
         let path = if n > 0 { String::from_utf8_lossy(&buf[..n as usize]).to_string() } else { String::new() };
         let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".into());
-        // `codesign -d -r-` prints the designated requirement, which pins the signer, not just the path.
         let out = Command::new("/usr/bin/codesign").args(["-d", "-r-", &path]).output().ok();
         let req = out.and_then(|o| {
             let t = String::from_utf8_lossy(&o.stderr).to_string() + &String::from_utf8_lossy(&o.stdout);
             t.lines().find(|l| l.contains("designated =>")).map(|l| l.trim().to_string())
         });
-        (req.unwrap_or_else(|| format!("unsigned:{path}")), name)
+        return (req.unwrap_or_else(|| format!("unsigned:{path}")), name);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let path = std::fs::read_link(format!("/proc/{pid}/exe")).map(|p| p.display().to_string()).unwrap_or_default();
         let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".into());
-        (format!("unsigned:{path}"), name)
+        return (format!("unsigned:{path}"), name);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        unknown()
     }
 }
 
-/// Keep the Mac awake while a backup runs (macOS). Dropping the guard releases it.
+/// Keep the computer awake while a backup runs. Dropping the guard releases it.
+/// macOS: `caffeinate`. Windows: a thread holding ES_SYSTEM_REQUIRED. Elsewhere: nothing.
+#[cfg(unix)]
 pub struct AwakeGuard(Option<Child>);
+#[cfg(windows)]
+pub struct AwakeGuard(Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>);
+
+#[cfg(unix)]
 impl AwakeGuard {
     pub fn new() -> Self {
         #[cfg(target_os = "macos")]
         {
-            // caffeinate -i prevents idle sleep; -w exits when this process does.
             let child = Command::new("/usr/bin/caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn().ok();
             return Self(child);
         }
@@ -84,17 +103,43 @@ impl AwakeGuard {
         Self(None)
     }
 }
-impl Default for AwakeGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[cfg(unix)]
 impl Drop for AwakeGuard {
     fn drop(&mut self) {
         if let Some(c) = &mut self.0 {
             let _ = c.kill();
             let _ = c.wait();
         }
+    }
+}
+
+#[cfg(windows)]
+impl AwakeGuard {
+    pub fn new() -> Self {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        // The execution state belongs to the calling thread, so a dedicated thread holds it until dropped.
+        let h = std::thread::spawn(move || {
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+            let _ = rx.recv();
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        });
+        Self(Some((tx, h)))
+    }
+}
+#[cfg(windows)]
+impl Drop for AwakeGuard {
+    fn drop(&mut self) {
+        if let Some((tx, h)) = self.0.take() {
+            let _ = tx.send(());
+            let _ = h.join();
+        }
+    }
+}
+
+impl Default for AwakeGuard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

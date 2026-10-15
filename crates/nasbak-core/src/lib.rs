@@ -63,10 +63,10 @@ impl Job {
             return Err(Error::Invalid("no folders".into()));
         }
         for f in &self.folders {
-            if !f.source.starts_with('/') {
+            if !std::path::Path::new(&f.source).is_absolute() {
                 return Err(Error::Invalid(format!("source must be absolute: {}", f.source)));
             }
-            if f.dest.starts_with('/') || f.dest.split('/').any(|p| p == "..") || f.dest.is_empty() {
+            if f.dest.starts_with('/') || f.dest.contains('\\') || f.dest.split('/').any(|p| p == "..") || f.dest.is_empty() {
                 return Err(Error::Invalid(format!("bad destination: {}", f.dest)));
             }
         }
@@ -152,3 +152,20 @@ pub struct DeletedFile {
 
 /// Name of the marker file that proves the destination is the real NAS and not an empty mount point.
 pub const DEST_MARKER: &str = ".nasbak-destination";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn job(source: &str, dest: &str) -> Job {
+        Job { id: 1, name: "j".into(), folders: vec![FolderPair { source: source.into(), dest: dest.into() }], dest_root: "x".into(),
+            schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
+    }
+    #[test]
+    fn dest_must_be_forward_slash_relative() {
+        let abs = if cfg!(windows) { r"C:\Users\h\Docs" } else { "/Users/h/Docs" };
+        assert!(job(abs, "mac/Docs").validate().is_ok());
+        assert!(job(abs, r"mac\Docs").validate().is_err());
+        assert!(job(abs, "../Docs").validate().is_err());
+        assert!(job("relative/path", "mac/Docs").validate().is_err());
+    }
+}

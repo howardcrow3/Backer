@@ -5,6 +5,8 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtTime = s => s ? new Date(s * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
 const fmtBytes = n => n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n > 1e3 ? (n / 1e3).toFixed(0) + ' KB' : n + ' B';
+const isWin = /Windows/.test(navigator.userAgent);
+const base = p => p.split(/[\\/]/).filter(Boolean).pop() || 'folder';
 const schedText = s => ({ manual: 'Run now only', every_hours: `Every ${s.hours} h`, daily: `Daily at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`, weekly: `Weekly at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}` }[s.kind]);
 
 let view = 'jobs', detailId = null, timer = null;
@@ -93,14 +95,14 @@ function wizard() {
   const draw = () => {
     const body = [
       `<h1 style="font-size:18px">Which folders do you want to back up?</h1>${w.folders.map((f, i) => `<div class="card row"><span class="mono" style="flex:1">${esc(f)}</span><button class="link" data-rm="${i}">Remove</button></div>`).join('')}<button id="add">Add folder…</button>`,
-      `<h1 style="font-size:18px">Where should the backup go?</h1><div class="sub">Mount your NAS share in Finder first (Go ▸ Connect to Server), then choose its folder.</div><div class="row"><input id="root" class="mono" readonly value="${esc(w.dest_root)}" placeholder="/Volumes/backups"><button id="pick">Choose…</button></div><label>Folder on the NAS for these backups</label><input id="base" value="${esc(w.dest_base)}"><div class="sub" style="margin-top:8px">New destinations are marked with a small file so the app never writes to an unmounted share.</div>`,
+      `<h1 style="font-size:18px">Where should the backup go?</h1><div class="sub">${isWin ? 'Connect to your NAS share in File Explorer first (for example map it to a drive letter, or open \\\\nas\\share), then choose its folder.' : 'Mount your NAS share in Finder first (Go ▸ Connect to Server), then choose its folder.'}</div><div class="row"><input id="root" class="mono" readonly value="${esc(w.dest_root)}" placeholder="${isWin ? 'Z:\\\\backups' : '/Volumes/backups'}"><button id="pick">Choose…</button></div><label>Folder on the NAS for these backups</label><input id="base" value="${esc(w.dest_base)}"><div class="sub" style="margin-top:8px">New destinations are marked with a small file so the app never writes to an unmounted share.</div>`,
       `<h1 style="font-size:18px">When should it run?</h1><label>Schedule</label><select id="sched">${[['manual', 'Only when I click Run now'], ['every_hours', 'Every few hours'], ['daily', 'Every day'], ['weekly', 'Certain days']].map(([v, t]) => `<option value="${v}" ${w.sched === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
         ${w.sched === 'every_hours' ? `<label>Hours</label><input id="hours" type="number" min="1" max="168" value="${w.hours}">` : ''}
         ${['daily', 'weekly'].includes(w.sched) ? `<label>Time</label><input id="time" type="time" value="${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}">` : ''}
         ${w.sched === 'weekly' ? `<label>Days</label><div class="row">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((n, i) => `<label style="margin:0"><input type="checkbox" style="width:auto;height:auto" data-day="${i + 1}" ${w.days.includes(i + 1) ? 'checked' : ''}> ${n}</label>`).join('')}</div>` : ''}
         <label style="margin-top:12px"><input id="catch" type="checkbox" style="width:auto;height:auto" ${w.catch_up ? 'checked' : ''}> Run at the next opportunity if the Mac was asleep</label>`,
       `<h1 style="font-size:18px">A few options</h1><label>Skip files larger than (GB, blank for no limit)</label><input id="max" type="number" min="1" value="${esc(w.max_gb)}"><div class="card">Files you delete on this Mac stay on the NAS. The app lists them and nothing is removed until you confirm.</div>`,
-      `<h1 style="font-size:18px">Ready to start</h1><label>Name</label><input id="name" value="${esc(w.name || w.folders.map(f => f.split('/').pop()).join(', '))}"><div class="card">${w.folders.map(f => `<div class="mono">${esc(f)} → ${esc(w.dest_base)}/${esc(f.split('/').pop())}</div>`).join('')}<div class="sub" style="margin-top:6px">Destination: ${esc(w.dest_root)} · ${w.sched === 'manual' ? 'Run now only' : w.sched}</div></div><label><input id="first" type="checkbox" style="width:auto;height:auto" checked> Start the first backup now</label>`,
+      `<h1 style="font-size:18px">Ready to start</h1><label>Name</label><input id="name" value="${esc(w.name || w.folders.map(f => base(f)).join(', '))}"><div class="card">${w.folders.map(f => `<div class="mono">${esc(f)} → ${esc(w.dest_base)}/${esc(base(f))}</div>`).join('')}<div class="sub" style="margin-top:6px">Destination: ${esc(w.dest_root)} · ${w.sched === 'manual' ? 'Run now only' : w.sched}</div></div><label><input id="first" type="checkbox" style="width:auto;height:auto" checked> Start the first backup now</label>`,
     ][step];
     d.innerHTML = `<div class="steps">${names.map((n, i) => i === step ? `<b>${i + 1} ${n}</b>` : `<span>${i + 1} ${n}</span>`).join('<span>›</span>')}</div>${body}<div class="err">${esc(error)}</div>
       <div class="row" style="justify-content:flex-end;margin-top:16px"><button id="cancel">Cancel</button>${step ? '<button id="back">Back</button>' : ''}<button class="pri" id="next">${step === 4 ? 'Create job' : 'Continue'}</button></div>`;
@@ -109,7 +111,7 @@ function wizard() {
     $('#next', d).onclick = next;
     if ($('#add', d)) $('#add', d).onclick = async () => { const p = await T.dialog.open({ directory: true, multiple: true }); if (p) { [].concat(p).forEach(x => !w.folders.includes(x) && w.folders.push(x)); draw(); } };
     d.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { w.folders.splice(+b.dataset.rm, 1); draw(); });
-    if ($('#pick', d)) $('#pick', d).onclick = async () => { const p = await T.dialog.open({ directory: true, defaultPath: '/Volumes' }); if (p) { w.dest_root = p; draw(); } };
+    if ($('#pick', d)) $('#pick', d).onclick = async () => { const p = await T.dialog.open({ directory: true, defaultPath: isWin ? undefined : '/Volumes' }); if (p) { w.dest_root = p; draw(); } };
     if ($('#sched', d)) $('#sched', d).onchange = e => { read(); w.sched = e.target.value; draw(); };
   };
   function read() {
@@ -133,7 +135,7 @@ function wizard() {
     if (step < 4) { step++; return draw(); }
     const schedule = { manual: { kind: 'manual' }, every_hours: { kind: 'every_hours', hours: w.hours }, daily: { kind: 'daily', hour: w.hour, minute: w.minute }, weekly: { kind: 'weekly', days: w.days, hour: w.hour, minute: w.minute } }[w.sched];
     const job = { id: 0, name: w.name || 'Backup', dest_root: w.dest_root, schedule, paused: false, catch_up: w.catch_up, exclude_names: [], max_file_bytes: w.max_gb ? Math.round(+w.max_gb * 1e9) : null,
-      folders: w.folders.map(f => ({ source: f, dest: `${w.dest_base}/${f.split('/').pop()}` })) };
+      folders: w.folders.map(f => ({ source: f, dest: `${w.dest_base}/${base(f)}` })) };
     try { const r = await call('save_job', { job }); if ($('#first', d).checked) await call('run_job', { job_id: r.job_id }); d.close(); render(); } catch (e) { error = String(e); draw(); }
   }
   draw(); d.showModal();
