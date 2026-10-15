@@ -18,26 +18,56 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: ./scripts/check-crate-graph.sh
   dmg:
-    # Builds the installable app for Apple silicon. Unsigned (ad hoc), so first launch needs right-click > Open.
+    # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-14
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - name: Import Developer ID certificate
+        if: env.APPLE_CERTIFICATE != ''
+        run: |
+          KC="$RUNNER_TEMP/build.keychain-db"; KP="$(uuidgen)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KP" "$KC"
+          security list-keychains -d user -s "$KC" login.keychain-db
+          ID=$(security find-identity -v -p codesigning "$KC" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
+      - name: Ad hoc signing (no Apple secrets)
+        if: env.APPLE_CERTIFICATE == ''
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
       - run: cargo build --release -p nasbak-agent
-      - name: Bundle the agent next to the app
+      - name: Sign and bundle the agent
         run: |
           mkdir -p app/src-tauri/binaries
-          cp target/release/nasbak-agent app/src-tauri/binaries/nasbak-agent-aarch64-apple-darwin
+          B=app/src-tauri/binaries/nasbak-agent-aarch64-apple-darwin
+          cp target/release/nasbak-agent "$B"
+          if [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then codesign --force --sign - "$B"
+          else codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$B"; fi
       - run: cargo install tauri-cli --version "^2" --locked
       - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
       - run: cd app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+      - name: Verify
+        run: |
+          APP=$(ls -d target/aarch64-apple-darwin/release/bundle/macos/*.app app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app 2>/dev/null | head -1)
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|flags" || true
+          if [ -n "$APPLE_CERTIFICATE" ]; then spctl --assess --type execute --verbose "$APP"; xcrun stapler validate "$APP" || true; fi
       - name: Collect
         run: |
           mkdir out
           cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/ || cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/
-          ls -la out
       - uses: actions/upload-artifact@v4
         with:
           name: File-Backup-macOS-arm64-dmg

@@ -34,8 +34,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "hardenedRuntime": true,
-      "signingIdentity": "-"
+      "hardenedRuntime": true
     },
     "externalBin": [
       "binaries/nasbak-agent"
