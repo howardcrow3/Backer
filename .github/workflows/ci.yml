@@ -14,7 +14,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - name: cargo test
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace 2>&1 | tee out.txt
+          code=${PIPESTATUS[0]}
+          # Surface failures as annotations so they show up without opening the raw log.
+          grep -E "FAILED|panicked|^error" out.txt | head -25 | while IFS= read -r l; do echo "::error::${l//%/%25}"; done
+          exit $code
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: ./scripts/check-crate-graph.sh
         shell: bash
