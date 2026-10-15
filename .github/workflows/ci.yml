@@ -20,19 +20,25 @@ jobs:
   dmg:
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-14
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - name: Export Apple secrets (only if all are set; empty variables would make Tauri try to notarize)
+        env:
+          S_CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          S_CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          S_ID: ${{ secrets.APPLE_ID }}
+          S_PW: ${{ secrets.APPLE_PASSWORD }}
+          S_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$S_CERT" ] && [ -n "$S_CERT_PW" ] && [ -n "$S_ID" ] && [ -n "$S_PW" ] && [ -n "$S_TEAM" ]; then
+            { echo "APPLE_CERTIFICATE=$S_CERT"; echo "APPLE_CERTIFICATE_PASSWORD=$S_CERT_PW"; echo "APPLE_ID=$S_ID"; echo "APPLE_PASSWORD=$S_PW"; echo "APPLE_TEAM_ID=$S_TEAM"; } >> "$GITHUB_ENV"
+            echo "SIGNED=1" >> "$GITHUB_ENV"
+          fi
       - name: Import Developer ID certificate
-        if: env.APPLE_CERTIFICATE != ''
+        if: env.SIGNED == '1'
         run: |
           KC="$RUNNER_TEMP/build.keychain-db"; KP="$(uuidgen)"
           echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -45,7 +51,7 @@ jobs:
           ID=$(security find-identity -v -p codesigning "$KC" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
           echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
       - name: Ad hoc signing (no Apple secrets)
-        if: env.APPLE_CERTIFICATE == ''
+        if: env.SIGNED != '1'
         run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
       - run: cargo build --release -p nasbak-agent
       - name: Sign and bundle the agent
@@ -63,7 +69,7 @@ jobs:
           APP=$(ls -d target/aarch64-apple-darwin/release/bundle/macos/*.app app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app 2>/dev/null | head -1)
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -dv "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|flags" || true
-          if [ -n "$APPLE_CERTIFICATE" ]; then spctl --assess --type execute --verbose "$APP"; xcrun stapler validate "$APP" || true; fi
+          if [ "$SIGNED" = "1" ]; then spctl --assess --type execute --verbose "$APP"; xcrun stapler validate "$APP" || true; fi
       - name: Collect
         run: |
           mkdir out
