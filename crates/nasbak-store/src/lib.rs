@@ -181,8 +181,12 @@ fn escape_like(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{}", p.replace('/', "\\")) } else { p.to_string() }
+    }
+
     fn job() -> Job {
-        Job { id: 0, name: "t".into(), folders: vec![FolderPair { source: "/a".into(), dest: "mac/a".into() }],
+        Job { id: 0, name: "t".into(), folders: vec![FolderPair { source: abs("/a"), dest: "mac/a".into() }],
             dest_root: "/Volumes/x".into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
     }
 
@@ -193,7 +197,7 @@ mod tests {
         let id = s.save_job(&mut j).unwrap();
         assert_eq!(s.get_job(id).unwrap().unwrap(), j);
         let mut bad = job();
-        bad.folders.push(FolderPair { source: "/b".into(), dest: "mac/a/sub".into() });
+        bad.folders.push(FolderPair { source: abs("/b"), dest: "mac/a/sub".into() });
         assert!(s.save_job(&mut bad).is_err());
     }
 
