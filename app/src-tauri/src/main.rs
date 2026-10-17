@@ -137,6 +137,7 @@ fn main() {
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&open, &run, &sep, &quit])?;
             let base = app.default_window_icon().unwrap().clone();
+            let (rgba, iw, ih) = (base.rgba().to_vec(), base.width(), base.height());
             TrayIconBuilder::with_id("main")
                 .icon(base.clone())
                 .icon_as_template(false) // a template icon would be drawn in one colour and hide the dot
@@ -156,7 +157,7 @@ fn main() {
                     let h = call("list_jobs", serde_json::json!({})).map(|j| tray_dot::health_of(&j)).unwrap_or(tray_dot::Health::None);
                     if shown != Some(h) {
                         if let Some(tray) = handle.tray_by_id("main") {
-                            let img = tauri::image::Image::new_owned(tray_dot::with_dot(base.rgba(), base.width(), base.height(), h), base.width(), base.height());
+                            let img = tauri::image::Image::new_owned(tray_dot::with_dot(&rgba, iw, ih, h), iw, ih);
                             let _ = tray.set_icon(Some(img));
                             let _ = tray.set_tooltip(Some(h.tooltip()));
                             shown = Some(h);
