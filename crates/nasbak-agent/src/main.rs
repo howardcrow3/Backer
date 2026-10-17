@@ -31,6 +31,12 @@ fn main() -> Result<()> {
             print!("{}", platform::launch_agent_plist("com.filebackup.agent", &exe, &dir));
             Ok(())
         }
+        // Launched by an AI assistant as its MCP server: copies JSON-RPC lines between stdio and the agent.
+        "mcp-bridge" => {
+            let out: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
+            nasbak_agent::bridge::run(&dir, std::io::stdin().lock(), out)?;
+            Ok(())
+        }
         "run" => {
             let agent = Agent::new(dir.join("state.sqlite"), TimeZone::system()).context("opening state")?;
             let ui = Listener::bind(&dir, "ui").context("ui listener")?;

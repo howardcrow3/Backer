@@ -30,3 +30,16 @@ Copy `target/release/nasbak-agent` next to the app binary (`Contents/MacOS/`) so
 ## Status
 See the design doc. Done and tested on Linux: everything in `crates/`. Written but **not yet compiled or run on macOS**: the `cfg(target_os = "macos")` branches in `nasbak-agent/src/platform.rs` and all of `app/`.
 Not built yet: SFTP connector, browse-and-restore, signing/notarization, Windows.
+
+## Windows
+
+The same workspace builds on Windows (CI builds an unsigned NSIS installer). The agent listens on loopback TCP with a
+random token kept in `%LOCALAPPDATA%\FileBackup`. Windows cannot tell which program is on a local port, so MCP approval
+there is one shared "unverified" identity; Authenticode-based identity is future work.
+
+## Connecting an AI assistant (MCP)
+
+Assistants launch `nasbak-agent mcp-bridge` (Settings, "Connect an assistant" shows the exact JSON). The bridge only copies
+JSON-RPC lines between stdio and the agent. The agent identifies the program that launched the bridge (macOS: its
+code-signing requirement) and answers only after you allow it in the app. `crates/nasbak-agent/tests/bridge_e2e.rs` runs
+a real agent and a real bridge end to end.

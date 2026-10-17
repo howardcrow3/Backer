@@ -58,12 +58,18 @@ pub fn my_uid() -> u32 {
 pub fn client_identity(pid: Option<i32>) -> (String, String) {
     let unknown = || ("unverified-client".to_string(), "unknown program".to_string());
     let Some(pid) = pid else { return unknown() };
+    // Assistants reach us through our own `mcp-bridge` command. The program to approve is the one
+    // that launched the bridge, not the bridge. The parent comes from the OS, so a program cannot claim
+    // to be someone else; the worst it can do is launch the bridge itself and be asked about as itself.
+    let pid = match (exe_of(pid), std::env::current_exe().ok()) {
+        (Some(a), Some(b)) if a == b => parent_of(pid).filter(|p| *p > 1).unwrap_or(pid),
+        _ => pid,
+    };
+    let Some(path) = exe_of(pid) else { return unknown() };
+    let path = path.display().to_string();
+    let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".into());
     #[cfg(target_os = "macos")]
     {
-        let mut buf = [0u8; 4096];
-        let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
-        let path = if n > 0 { String::from_utf8_lossy(&buf[..n as usize]).to_string() } else { String::new() };
-        let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".into());
         let out = Command::new("/usr/bin/codesign").args(["-d", "-r-", &path]).output().ok();
         let req = out.and_then(|o| {
             let t = String::from_utf8_lossy(&o.stderr).to_string() + &String::from_utf8_lossy(&o.stdout);
@@ -71,16 +77,39 @@ pub fn client_identity(pid: Option<i32>) -> (String, String) {
         });
         return (req.unwrap_or_else(|| format!("unsigned:{path}")), name);
     }
+    #[allow(unreachable_code)]
+    (format!("unsigned:{path}"), name)
+}
+
+/// Path of the program running as `pid` (unix only; on Windows the OS does not tell us who is on a TCP port).
+fn exe_of(pid: i32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 4096];
+        let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+        return (n > 0).then(|| std::path::PathBuf::from(String::from_utf8_lossy(&buf[..n as usize]).to_string()));
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let path = std::fs::read_link(format!("/proc/{pid}/exe")).map(|p| p.display().to_string()).unwrap_or_default();
-        let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".into());
-        return (format!("unsigned:{path}"), name);
+        return std::fs::read_link(format!("/proc/{pid}/exe")).ok();
     }
     #[allow(unreachable_code)]
     {
         let _ = pid;
-        unknown()
+        None
+    }
+}
+
+fn parent_of(pid: i32) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let o = std::process::Command::new("/bin/ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok()?;
+        return String::from_utf8_lossy(&o.stdout).trim().parse().ok();
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        None
     }
 }
 

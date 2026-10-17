@@ -1,5 +1,6 @@
 //! The background agent: owns schedules, runs jobs, serves the app (ui.sock) and assistants (mcp.sock).
 pub mod approvals;
+pub mod bridge;
 pub mod ipc;
 pub mod server;
 pub mod platform;

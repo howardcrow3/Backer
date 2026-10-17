@@ -50,6 +50,15 @@ fn agent_call(method: String, params: serde_json::Value) -> Result<serde_json::V
     call(&method, params)
 }
 
+/// The JSON an AI assistant needs in its MCP settings to launch the bridge.
+#[tauri::command]
+fn mcp_config() -> Result<String, String> {
+    let exe = agent_exe().ok_or("cannot locate the agent")?;
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": { "file-backup": { "command": exe.display().to_string(), "args": ["mcp-bridge"] } }
+    })).map_err(|e| e.to_string())?)
+}
+
 fn agent_exe() -> Option<PathBuf> {
     let name = if cfg!(windows) { "nasbak-agent.exe" } else { "nasbak-agent" };
     std::env::current_exe().ok()?.parent().map(|d| d.join(name))
@@ -117,7 +126,7 @@ fn run_all() {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config])
         .setup(|app| {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open File Backup", true, None::<&str>)?;

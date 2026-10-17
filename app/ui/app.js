@@ -9,6 +9,13 @@ const isWin = /Windows/.test(navigator.userAgent);
 const base = p => p.split(/[\\/]/).filter(Boolean).pop() || 'folder';
 const schedText = s => ({ manual: 'Run now only', every_hours: `Every ${s.hours} h`, daily: `Daily at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`, weekly: `Weekly at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}` }[s.kind]);
 
+function toast(msg, bad) {
+  let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
+  el.textContent = msg; el.className = bad ? 'bad' : 'good'; el.style.display = 'block';
+  clearTimeout(el._t); el._t = setTimeout(() => { el.style.display = 'none'; }, bad ? 12000 : 4000);
+  el.onclick = () => { el.style.display = 'none'; };
+}
+
 let view = 'jobs', detailId = null, timer = null;
 
 function statusPill(j) {
@@ -81,10 +88,16 @@ async function renderDeleted() {
 
 async function renderSettings() {
   const clients = await call('list_mcp_clients');
+  const cfg = await T.core.invoke('mcp_config').catch(() => '');
   $('#main').innerHTML = `<h1>Settings</h1><h2>AI assistants (MCP)</h2>
     <div class="sub">Approved assistants can see jobs, run them, pause them and change schedules. They cannot delete files or change what is backed up.</div>
     ${clients.length ? `<table><thead><tr><th>Program</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody>${clients.map(c => `<tr><td>${esc(c.client.name)}<div class="mono" style="color:var(--mute)">${esc(c.identity.slice(0, 60))}</div></td><td>${c.client.approved ? '<span class="pill ok">Approved</span>' : '<span class="pill warn">Waiting for you</span>'}</td><td>${fmtTime(c.client.last_used)}</td>
-      <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}`;
+      <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}
+    <h2>Connect an assistant</h2>
+    <div class="sub">Add this to your assistant's MCP settings (for Claude Desktop: Settings, Developer, Edit Config), then restart it. It will appear above, waiting for you to allow it.</div>
+    <pre class="card mono" style="white-space:pre-wrap;user-select:all">${esc(cfg)}</pre>
+    <button id="copycfg">Copy</button>`;
+  const cb = $('#copycfg'); if (cb) cb.onclick = async () => { try { await navigator.clipboard.writeText(cfg); toast('Copied.'); } catch { toast('Select the text and copy it.', true); } };
 }
 
 // ---- New job wizard (5 steps in one dialog)
@@ -148,7 +161,12 @@ document.addEventListener('click', async e => {
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
   else if (ds.open) { detailId = +ds.open; }
   else if (ds.back !== undefined) { detailId = null; }
-  else if (ds.test) { const r = await call('test_connection', { job_id: +ds.test }); alert(r.ok ? 'The NAS is reachable.' : r.error); }
+  else if (ds.test) {
+    const b = t; const label = b.textContent; b.disabled = true; b.textContent = 'Testing…';
+    try { const r = await call('test_connection', { job_id: +ds.test }); toast(r.ok ? 'The NAS is reachable.' : (r.error || 'The NAS could not be reached.'), !r.ok); }
+    catch (e) { toast('Could not test the NAS: ' + (e && e.message || e), true); }
+    finally { b.disabled = false; b.textContent = label; }
+  }
   else if (ds.log) { const rows = await call('get_run_log', { run_id: +ds.log }); $('#log').innerHTML = `<h2>Run log</h2><div class="card mono">${rows.map(r => `${esc(r.kind)} ${esc(r.path)} ${esc(r.detail || '')}`).join('<br>') || 'Nothing logged.'}</div>`; return; }
   else if (ds.approve) { await call('approve_mcp_client', { identity: ds.approve }); }
   else if (ds.revoke) { await call('revoke_mcp_client', { identity: ds.revoke }); }
