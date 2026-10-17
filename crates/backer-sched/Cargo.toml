@@ -1,0 +1,9 @@
+[package]
+name = "backer-sched"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+backer-core.workspace = true
+jiff.workspace = true

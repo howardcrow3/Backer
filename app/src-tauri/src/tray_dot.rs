@@ -14,10 +14,10 @@ pub enum Health {
 impl Health {
     pub fn tooltip(self) -> &'static str {
         match self {
-            Health::None => "File Backup",
-            Health::Good => "File Backup: last backup succeeded",
-            Health::Warnings => "File Backup: last backup finished with warnings",
-            Health::Failed => "File Backup: last backup failed",
+            Health::None => "Backer",
+            Health::Good => "Backer: last backup succeeded",
+            Health::Warnings => "Backer: last backup finished with warnings",
+            Health::Failed => "Backer: last backup failed",
         }
     }
     fn rgb(self) -> Option<[u8; 3]> {

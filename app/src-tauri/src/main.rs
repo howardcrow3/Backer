@@ -15,9 +15,9 @@ impl<T: Read + Write> Rw for T {}
 
 fn data_dir() -> PathBuf {
     if cfg!(windows) {
-        return PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("FileBackup");
+        return PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Backer");
     }
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/FileBackup")
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/Backer")
 }
 
 /// macOS: Unix socket. Windows: 127.0.0.1 port and token read from the endpoint file in the user's profile.
@@ -57,12 +57,12 @@ fn agent_call(method: String, params: serde_json::Value) -> Result<serde_json::V
 fn mcp_config() -> Result<String, String> {
     let exe = agent_exe().ok_or("cannot locate the agent")?;
     Ok(serde_json::to_string_pretty(&serde_json::json!({
-        "mcpServers": { "file-backup": { "command": exe.display().to_string(), "args": ["mcp-bridge"] } }
+        "mcpServers": { "backer": { "command": exe.display().to_string(), "args": ["mcp-bridge"] } }
     })).map_err(|e| e.to_string())?)
 }
 
 fn agent_exe() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "nasbak-agent.exe" } else { "nasbak-agent" };
+    let name = if cfg!(windows) { "backer-agent.exe" } else { "backer-agent" };
     std::env::current_exe().ok()?.parent().map(|d| d.join(name))
 }
 
@@ -77,11 +77,11 @@ fn ensure_agent() {
     {
         let Ok(plist) = Command::new(&agent).arg("print-launch-agent").output() else { return };
         let home = std::env::var("HOME").unwrap_or_default();
-        let path = PathBuf::from(&home).join("Library/LaunchAgents/com.filebackup.agent.plist");
+        let path = PathBuf::from(&home).join("Library/LaunchAgents/com.backer.agent.plist");
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         if std::fs::write(&path, plist.stdout).is_ok() {
             let uid = Command::new("/usr/bin/id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|_| "501".into());
-            let _ = Command::new("/bin/launchctl").args(["bootout", &format!("gui/{uid}/com.filebackup.agent")]).status();
+            let _ = Command::new("/bin/launchctl").args(["bootout", &format!("gui/{uid}/com.backer.agent")]).status();
             let _ = Command::new("/bin/launchctl").args(["bootstrap", &format!("gui/{uid}"), path.to_str().unwrap_or("")]).status();
         }
     }
@@ -92,7 +92,7 @@ fn ensure_agent() {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         // Start at every login (per user, no admin rights needed), and start it now.
         let _ = Command::new("schtasks")
-            .args(["/Create", "/TN", "FileBackupAgent", "/SC", "ONLOGON", "/RL", "LIMITED", "/F", "/TR", &format!("\"{}\" run", agent.display())])
+            .args(["/Create", "/TN", "BackerAgent", "/SC", "ONLOGON", "/RL", "LIMITED", "/F", "/TR", &format!("\"{}\" run", agent.display())])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
         let _ = Command::new(&agent).arg("run").creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();
@@ -131,9 +131,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![agent_call, mcp_config])
         .setup(|app| {
             ensure_agent();
-            let open = MenuItem::with_id(app, "open", "Open File Backup", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;
             let run = MenuItem::with_id(app, "run_all", "Run all now", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit File Backup", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Backer", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&open, &run, &sep, &quit])?;
             let base = app.default_window_icon().unwrap().clone();
@@ -176,5 +176,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running File Backup");
+        .expect("error while running Backer");
 }

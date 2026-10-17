@@ -1,0 +1,17 @@
+[package]
+name = "backer-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+backer-core.workspace = true
+backer-store.workspace = true
+backer-connector.workspace = true
+blake3.workspace = true
+walkdir.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

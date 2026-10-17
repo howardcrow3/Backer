@@ -23,10 +23,10 @@ libc = "0.2"
 getrandom = "0.3"
 windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
-nasbak-core = { path = "crates/nasbak-core" }
-nasbak-store = { path = "crates/nasbak-store" }
-nasbak-connector = { path = "crates/nasbak-connector" }
-nasbak-engine = { path = "crates/nasbak-engine" }
-nasbak-sched = { path = "crates/nasbak-sched" }
-nasbak-mcp = { path = "crates/nasbak-mcp" }
-nasbak-removal = { path = "crates/nasbak-removal" }
+backer-core = { path = "crates/backer-core" }
+backer-store = { path = "crates/backer-store" }
+backer-connector = { path = "crates/backer-connector" }
+backer-engine = { path = "crates/backer-engine" }
+backer-sched = { path = "crates/backer-sched" }
+backer-mcp = { path = "crates/backer-mcp" }
+backer-removal = { path = "crates/backer-removal" }

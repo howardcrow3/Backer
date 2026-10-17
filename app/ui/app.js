@@ -41,7 +41,7 @@ async function render() {
     if (view === 'settings') return await renderSettings();
   } catch (e) {
     $('#agent').textContent = 'Agent not running';
-    $('#main').innerHTML = `<h1>File Backup</h1><div class="banner">${esc(e)}</div>`;
+    $('#main').innerHTML = `<h1>Backer</h1><div class="banner">${esc(e)}</div>`;
   }
 }
 

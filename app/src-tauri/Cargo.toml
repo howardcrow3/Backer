@@ -1,5 +1,5 @@
 [package]
-name = "file-backup-app"
+name = "backer-app"
 version = "0.1.0"
 edition = "2021"
 

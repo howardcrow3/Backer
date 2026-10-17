@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "File Backup",
+  "productName": "Backer",
   "version": "0.1.0",
-  "identifier": "com.filebackup.app",
+  "identifier": "com.backer.app",
   "build": {
     "frontendDist": "../ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "File Backup",
+        "title": "Backer",
         "width": 1040,
         "height": 660,
         "minWidth": 860,
@@ -35,7 +35,7 @@
       "hardenedRuntime": true
     },
     "externalBin": [
-      "binaries/nasbak-agent"
+      "binaries/backer-agent"
     ]
   }
 }

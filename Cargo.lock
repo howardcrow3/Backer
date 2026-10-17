@@ -27,6 +27,100 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "backer-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backer-connector",
+ "backer-core",
+ "backer-engine",
+ "backer-mcp",
+ "backer-removal",
+ "backer-sched",
+ "backer-store",
+ "getrandom 0.3.4",
+ "jiff",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "backer-connector"
+version = "0.1.0"
+dependencies = [
+ "backer-core",
+ "blake3",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "backer-core"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "backer-engine"
+version = "0.1.0"
+dependencies = [
+ "backer-connector",
+ "backer-core",
+ "backer-store",
+ "blake3",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+ "walkdir",
+]
+
+[[package]]
+name = "backer-mcp"
+version = "0.1.0"
+dependencies = [
+ "backer-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "backer-removal"
+version = "0.1.0"
+dependencies = [
+ "backer-connector",
+ "backer-core",
+ "backer-store",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "backer-sched"
+version = "0.1.0"
+dependencies = [
+ "backer-core",
+ "jiff",
+]
+
+[[package]]
+name = "backer-store"
+version = "0.1.0"
+dependencies = [
+ "backer-core",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -282,100 +376,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "nasbak-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "getrandom 0.3.4",
- "jiff",
- "libc",
- "nasbak-connector",
- "nasbak-core",
- "nasbak-engine",
- "nasbak-mcp",
- "nasbak-removal",
- "nasbak-sched",
- "nasbak-store",
- "serde",
- "serde_json",
- "tempfile",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "nasbak-connector"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "nasbak-core",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "nasbak-core"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "nasbak-engine"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "nasbak-connector",
- "nasbak-core",
- "nasbak-store",
- "tempfile",
- "thiserror",
- "unicode-normalization",
- "walkdir",
-]
-
-[[package]]
-name = "nasbak-mcp"
-version = "0.1.0"
-dependencies = [
- "nasbak-core",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "nasbak-removal"
-version = "0.1.0"
-dependencies = [
- "nasbak-connector",
- "nasbak-core",
- "nasbak-store",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "nasbak-sched"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "nasbak-core",
-]
-
-[[package]]
-name = "nasbak-store"
-version = "0.1.0"
-dependencies = [
- "nasbak-core",
- "rusqlite",
- "serde_json",
- "tempfile",
- "thiserror",
-]
 
 [[package]]
 name = "once_cell"
