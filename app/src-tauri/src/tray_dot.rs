@@ -1,4 +1,6 @@
-//! Status dot on the tray icon: green when the last backups succeeded, red when one failed.
+//! Status dot on the tray icon: blue when the last backups succeeded, amber for warnings, vermilion when one failed.
+//! Colours are the design language's `success`, `accent` and `danger` (blue, not green, so success and failure stay
+//! apart for colour-blind users).
 //! Pure functions (no Tauri types) so they can be tested on their own.
 use serde_json::Value;
 
@@ -23,9 +25,9 @@ impl Health {
     fn rgb(self) -> Option<[u8; 3]> {
         match self {
             Health::None => None,
-            Health::Good => Some([0x2e, 0xb8, 0x4b]),
-            Health::Warnings => Some([0xf2, 0xa9, 0x00]),
-            Health::Failed => Some([0xe5, 0x39, 0x35]),
+            Health::Good => Some([0x14, 0x68, 0x9a]),
+            Health::Warnings => Some([0xf4, 0xa6, 0x2a]),
+            Health::Failed => Some([0xb3, 0x35, 0x0b]),
         }
     }
 }
@@ -112,7 +114,7 @@ mod tests {
         assert_eq!(px(&g, 2, 2), [0, 0, 0, 0], "top-left untouched");
         let centre = px(&g, 32 - 9, 32 - 9);
         assert_eq!(centre[3], 255);
-        assert!(centre[1] > centre[0] && centre[1] > centre[2], "green: {centre:?}");
+        assert!(centre[2] > centre[0] && centre[2] > centre[1], "blue: {centre:?}");
         let r = with_dot(&base, w, h, Health::Failed);
         let c = px(&r, 32 - 9, 32 - 9);
         assert!(c[0] > c[1] && c[0] > c[2], "red: {c:?}");

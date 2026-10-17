@@ -31,6 +31,11 @@ Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/`) so
 See the design doc. Done and tested on Linux: everything in `crates/`. Written but **not yet compiled or run on macOS**: the `cfg(target_os = "macos")` branches in `backer-agent/src/platform.rs` and all of `app/`.
 Not built yet: SFTP connector, browse-and-restore, signing/notarization, Windows.
 
+## Design
+The UI follows the Backer design language (colour tokens for light and dark, Instrument Sans / Instrument Serif / JetBrains Mono, the drive-bay "B" icon).
+Tokens live at the top of `app/ui/style.css`; fonts are bundled in `app/ui/fonts` (SIL OFL, no network); the app icon source is `app/icon-source.png`
+(`cargo tauri icon` turns it into every platform size, tray icon included). Status colours are blue (success), amber (warnings) and vermilion (failed), never green and red.
+
 ## Windows
 
 The same workspace builds on Windows (CI builds an unsigned NSIS installer). The agent listens on loopback TCP with a
