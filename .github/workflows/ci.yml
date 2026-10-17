@@ -72,6 +72,7 @@ jobs:
           else codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$B"; fi
       - run: cargo install tauri-cli --version "^2" --locked
       - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
+      - run: cd app/src-tauri && cargo test tray_dot
       - run: cd app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
       - name: Verify
         run: |

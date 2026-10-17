@@ -4,6 +4,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+mod tray_dot;
+
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, WindowEvent};
@@ -134,8 +136,10 @@ fn main() {
             let quit = MenuItem::with_id(app, "quit", "Quit File Backup", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&open, &run, &sep, &quit])?;
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            let base = app.default_window_icon().unwrap().clone();
+            TrayIconBuilder::with_id("main")
+                .icon(base.clone())
+                .icon_as_template(false) // a template icon would be drawn in one colour and hide the dot
                 .menu(&menu)
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "open" => show_main(app),
@@ -144,6 +148,23 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            // Refresh the dot from the agent's job list; the agent stays the single source of truth.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut shown = None;
+                loop {
+                    let h = call("list_jobs", serde_json::json!({})).map(|j| tray_dot::health_of(&j)).unwrap_or(tray_dot::Health::None);
+                    if shown != Some(h) {
+                        if let Some(tray) = handle.tray_by_id("main") {
+                            let img = tauri::image::Image::new_owned(tray_dot::with_dot(base.rgba(), base.width(), base.height(), h), base.width(), base.height());
+                            let _ = tray.set_icon(Some(img));
+                            let _ = tray.set_tooltip(Some(h.tooltip()));
+                            shown = Some(h);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                }
+            });
             Ok(())
         })
         // Closing the window hides it; backups continue.
