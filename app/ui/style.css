@@ -1,7 +1,6 @@
 /* Backer design language. Tokens mirror the "Backer Design Language" design system (light first, then dark).
    Fonts are bundled in ./fonts (SIL OFL, see fonts/OFL.txt) so the app never loads anything from the network. */
 @font-face{font-family:"Instrument Sans";src:url(fonts/InstrumentSans-Variable.woff2) format("woff2");font-weight:400 700;font-display:swap}
-@font-face{font-family:"Instrument Serif";src:url(fonts/InstrumentSerif-Regular.woff2) format("woff2");font-weight:400;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url(fonts/JetBrainsMono-Variable.woff2) format("woff2");font-weight:100 800;font-display:swap}
 
 :root{
@@ -19,7 +18,6 @@
   --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-6:24px;--space-8:32px;
   --radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-pill:999px;
   --font-sans:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
-  --font-serif:"Instrument Serif",Georgia,serif;
   --font-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){:root{
@@ -87,7 +85,7 @@ td{padding:10px 14px;border-top:1px solid var(--line);font-size:13px;line-height
 
 dialog{border:1px solid var(--line);border-radius:var(--radius-lg);padding:28px var(--space-8);width:560px;max-width:92vw;background:var(--surface-200);color:var(--ink);box-shadow:var(--shadow-md)}
 dialog::backdrop{background:rgba(5,10,10,.55)}
-dialog h1{font:400 30px/34px var(--font-serif);letter-spacing:-.2px;margin:0 0 var(--space-3)}
+dialog h1{font:650 22px/28px var(--font-sans);letter-spacing:-.2px;margin:0 0 var(--space-3)}
 label{display:block;color:var(--ink-muted);font-size:12px;line-height:16px;margin:var(--space-3) 0 var(--space-1)}
 input,select{width:100%;height:32px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:0 10px;background:var(--surface-200);color:var(--ink);font:inherit}
 input[type=checkbox]{accent-color:var(--brand)}
