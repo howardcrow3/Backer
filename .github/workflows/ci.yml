@@ -3,6 +3,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish a release with this tag (e.g. v0.1.0); leave empty to only build'
+        required: false
 jobs:
   test:
     strategy:
@@ -114,8 +118,8 @@ jobs:
           path: app/src-tauri/target/release/bundle/nsis/*.exe
 
   release:
-    # Runs only for tags like v0.1.0: publishes the two installers as a GitHub release.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Runs for a pushed v* tag, or a manual run with release_tag set: publishes the installers as a GitHub release.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
     needs: [dmg, windows]
     runs-on: ubuntu-latest
     permissions:
@@ -130,5 +134,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
-          gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" \
-            --title "Backer ${{ github.ref_name }}" --generate-notes
+          TAG="${{ inputs.release_tag || github.ref_name }}"
+          gh release create "$TAG" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "Backer $TAG" --generate-notes
