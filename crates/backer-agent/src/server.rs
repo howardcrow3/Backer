@@ -43,6 +43,11 @@ pub fn handle_ui_ext(a: &Arc<Agent>, req: &Value) -> Value {
         "list_mcp_clients" => json!({"ok": true, "result": a.approvals.list().into_iter().map(|(id, c)| json!({"identity": id, "client": c})).collect::<Vec<_>>()}),
         "approve_mcp_client" => json!({"ok": a.approvals.approve(ident)}),
         "revoke_mcp_client" => json!({"ok": a.approvals.revoke(ident)}),
+        // App-only (never offered to assistants): the tray's "Quit Backer and stop backups".
+        "quit_agent" => {
+            a.request_quit();
+            json!({"ok": true})
+        }
         _ => handle_ui(a, req),
     }
 }
@@ -116,6 +121,16 @@ mod tests {
     #[test]
     fn mcp_tcp_requires_approval_then_works_then_revoke_blocks() {
         mcp_flow(|d| Listener::bind_tcp(d, "mcp").unwrap(), |d| ipc::connect_tcp(d, "mcp").unwrap());
+    }
+
+    #[test]
+    fn quit_agent_sets_the_flag_and_cancels_running_work() {
+        let d = tempfile::tempdir().unwrap();
+        let agent = Agent::new_sync(d.path().join("db"), TimeZone::UTC).unwrap();
+        assert!(!agent.quit_requested());
+        let r = handle_ui_ext(&agent, &json!({"method":"quit_agent"}));
+        assert_eq!(r["ok"], true);
+        assert!(agent.quit_requested());
     }
 
     #[test]

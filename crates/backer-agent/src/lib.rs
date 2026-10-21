@@ -39,6 +39,8 @@ pub struct Agent {
     pub approvals: approvals::Approvals,
     /// Test hook: run synchronously instead of on a thread.
     sync_runs: bool,
+    /// Set when the tray asks the agent to stop; the main loop then exits.
+    quit: AtomicBool,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -48,14 +50,14 @@ pub fn now_ts() -> Timestamp {
 impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false) });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
     #[doc(hidden)]
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false) });
         a.store()?;
         Ok(a)
     }
@@ -110,6 +112,18 @@ impl Agent {
         } else {
             std::thread::spawn(work);
         }
+    }
+
+    /// Stop for good: cancel every running backup (files already copied stay valid) and tell the main loop to exit.
+    pub fn request_quit(&self) {
+        self.quit.store(true, Ordering::SeqCst);
+        for c in self.state.lock().unwrap().active.values() {
+            c.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.quit.load(Ordering::SeqCst)
     }
 
     pub fn cancel_job(&self, id: JobId) -> bool {

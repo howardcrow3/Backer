@@ -201,7 +201,7 @@ pub fn launch_agent_plist(label: &str, exe: &Path, log_dir: &Path) -> String {
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key><array><string>{exe}</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log}/agent.log</string>
   <key>StandardErrorPath</key><string>{log}/agent.err</string>
@@ -219,5 +219,7 @@ mod tests {
     fn plist_mentions_label_and_exe() {
         let p = launch_agent_plist("com.example.backer", Path::new("/Applications/x/agent"), Path::new("/tmp"));
         assert!(p.contains("com.example.backer") && p.contains("/Applications/x/agent") && p.contains("KeepAlive"));
+        // A clean exit (the tray's "Quit and stop backups") must not be restarted; only crashes are.
+        assert!(p.contains("<key>SuccessfulExit</key><false/>"));
     }
 }

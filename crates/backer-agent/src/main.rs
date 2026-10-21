@@ -46,10 +46,17 @@ fn main() -> Result<()> {
             let a2 = agent.clone();
             std::thread::spawn(move || { let _ = server::serve_mcp(a2, mcp); });
             // Wall-clock based, so a sleep/wake gap simply makes the next tick catch up.
-            loop {
+            while !agent.quit_requested() {
                 let _ = agent.tick(backer_agent::now_ts());
-                std::thread::sleep(Duration::from_secs(30));
+                // Sleep in short steps so a quit request from the tray is honoured within a second.
+                for _ in 0..60 {
+                    if agent.quit_requested() { break; }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
+            // Give cancelled runs a moment to finish their current file, then leave. The next start rebinds the sockets.
+            std::thread::sleep(Duration::from_millis(800));
+            Ok(())
         }
         other => anyhow::bail!("unknown command {other}"),
     }

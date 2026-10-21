@@ -7,8 +7,9 @@ use std::process::Command;
 mod tray_dot;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 trait Rw: Read + Write {}
 impl<T: Read + Write> Rw for T {}
@@ -109,10 +110,55 @@ fn ensure_agent() {
 }
 
 fn show_main(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
+        let _ = w.unminimize();
         let _ = w.set_focus();
     }
+}
+
+/// Hide the window but keep the tray (and the agent) running. On a Mac the Dock icon goes too.
+fn hide_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(false);
+}
+
+/// Ask the agent to stop, wait for it to go, and make sure the OS does not restart it.
+fn stop_service() {
+    let _ = call("quit_agent", serde_json::json!({}));
+    for _ in 0..20 {
+        if connect().is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Older installs had KeepAlive=true; unloading the job makes sure launchd never restarts it this session.
+        let uid = Command::new("/usr/bin/id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|_| "501".into());
+        let _ = Command::new("/bin/launchctl").args(["bootout", &format!("gui/{uid}/com.backer.agent")]).status();
+    }
+}
+
+/// The tray's quit: stops backups, so ask first.
+fn confirm_quit(app: &AppHandle) {
+    let done = app.clone();
+    app.dialog()
+        .message("Backups will stop until you open Backer again. A backup in progress is cancelled; files already copied stay on your NAS.")
+        .title("Quit Backer and stop backups?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Quit and stop backups".into(), "Keep running".into()))
+        .show(move |yes| {
+            if yes {
+                stop_service();
+                done.exit(0);
+            }
+        });
 }
 
 fn run_all() {
@@ -133,7 +179,7 @@ fn main() {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;
             let run = MenuItem::with_id(app, "run_all", "Run all now", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Backer", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Backer and stop backups…", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&open, &run, &sep, &quit])?;
             let base = app.default_window_icon().unwrap().clone();
@@ -142,10 +188,19 @@ fn main() {
                 .icon(base.clone())
                 .icon_as_template(false) // a template icon would be drawn in one colour and hide the dot
                 .menu(&menu)
+                // Windows convention: left click opens the app, right click shows the menu.
+                .show_menu_on_left_click(!cfg!(windows))
+                .on_tray_icon_event(|tray, ev| {
+                    if cfg!(windows) {
+                        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+                            show_main(tray.app_handle());
+                        }
+                    }
+                })
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "open" => show_main(app),
                     "run_all" => run_all(),
-                    "quit" => app.exit(0), // the background agent keeps running
+                    "quit" => confirm_quit(app),
                     _ => {}
                 })
                 .build(app)?;
@@ -168,13 +223,23 @@ fn main() {
             });
             Ok(())
         })
-        // Closing the window hides it; backups continue.
+        // Closing the window hides it; the tray and the agent keep running.
         .on_window_event(|w, ev| {
             if let WindowEvent::CloseRequested { api, .. } = ev {
                 api.prevent_close();
-                let _ = w.hide();
+                hide_main(w.app_handle());
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Backer");
+        .build(tauri::generate_context!())
+        .expect("error while building Backer")
+        .run(|app, ev| {
+            // Quitting the app (Cmd+Q, the app menu) only closes the window. The tray's own quit calls exit(0)
+            // with a code, which is let through.
+            if let RunEvent::ExitRequested { api, code, .. } = ev {
+                if code.is_none() {
+                    api.prevent_exit();
+                    hide_main(app);
+                }
+            }
+        });
 }
