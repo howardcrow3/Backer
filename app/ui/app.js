@@ -29,11 +29,23 @@ function statusPill(j) {
   return `<span class="pill idle">${esc(r.status)}</span>`;
 }
 
+// An assistant asked the user to set up a job. The user picks folders, NAS and times in the wizard.
+async function showRequest() {
+  const { request } = await call('new_job_request');
+  let b = $('#req');
+  if (request === null || request === undefined) { if (b) b.remove(); return; }
+  if (!b) { b = document.createElement('div'); b.id = 'req'; b.className = 'banner'; document.body.prepend(b); }
+  b.innerHTML = `<span>An assistant asked you to set up a new backup job${request ? ` called “${esc(request)}”` : ''}. You choose the folders, the NAS and the times.</span> <button class="pri" id="req-go">Set up…</button> <button id="req-no">Dismiss</button>`;
+  $('#req-go').onclick = () => wizard(request);
+  $('#req-no').onclick = async () => { await call('dismiss_new_job_request'); b.remove(); };
+}
+
 async function render() {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
   try {
     $('#agent').textContent = 'Agent running';
     const jobs = await call('list_jobs');
+    await showRequest();
     const pending = jobs.reduce((n, j) => n + j.pending_deleted, 0);
     const b = $('#badge'); b.hidden = !pending; b.textContent = pending;
     if (view === 'jobs') return detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
@@ -90,7 +102,7 @@ async function renderSettings() {
   const clients = await call('list_mcp_clients');
   const cfg = await T.core.invoke('mcp_config').catch(() => '');
   $('#main').innerHTML = `<h1>Settings</h1><h2>AI assistants (MCP)</h2>
-    <div class="sub">Approved assistants can see jobs, run them, pause them, change schedules and delete a whole job (they must give its exact name). They cannot delete files from the NAS, create jobs or change folders or destinations.</div>
+    <div class="sub">Approved assistants can see jobs, run them, pause them, change schedules and delete a whole job (they must give its exact name), and ask you to set up a new job (you choose the folders, NAS and times). They cannot delete files from the NAS, or choose or change folders or destinations.</div>
     ${clients.length ? `<table><thead><tr><th>Program</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody>${clients.map(c => `<tr><td>${esc(c.client.name)}<div class="mono" style="color:var(--ink-muted)">${esc(c.identity.slice(0, 60))}</div></td><td>${c.client.approved ? '<span class="pill ok">Approved</span>' : '<span class="pill warn">Waiting for you</span>'}</td><td>${fmtTime(c.client.last_used)}</td>
       <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}
     <h2>Connect an assistant</h2>
@@ -101,8 +113,8 @@ async function renderSettings() {
 }
 
 // ---- New job wizard (5 steps in one dialog)
-function wizard() {
-  const w = { name: '', folders: [], dest_root: '', dest_base: 'mac', sched: 'daily', hour: 2, minute: 0, hours: 6, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '' };
+function wizard(suggested = '') {
+  const w = { name: suggested, folders: [], dest_root: '', dest_base: 'mac', sched: 'daily', hour: 2, minute: 0, hours: 6, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '' };
   let step = 0; const names = ['Folders', 'NAS', 'Schedule', 'Options', 'Review'];
   const d = $('#dlg'); let error = '';
   const draw = () => {

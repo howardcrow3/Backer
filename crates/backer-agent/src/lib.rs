@@ -41,6 +41,8 @@ pub struct Agent {
     sync_runs: bool,
     /// Set when the tray asks the agent to stop; the main loop then exits.
     quit: AtomicBool,
+    /// A job set-up an assistant asked for (suggested name). The user completes or dismisses it in the app.
+    new_job_request: Mutex<Option<String>>,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -50,14 +52,14 @@ pub fn now_ts() -> Timestamp {
 impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None) });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
     #[doc(hidden)]
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None) });
         a.store()?;
         Ok(a)
     }
@@ -246,6 +248,14 @@ impl Control for AgentControl {
     fn delete_job(&self, id: JobId, job_name: &str) -> std::result::Result<Value, String> {
         self.0.delete_job(id, Some(job_name))
     }
+    fn create_job(&self, suggested_name: Option<&str>) -> std::result::Result<Value, String> {
+        let mut slot = self.0.new_job_request.lock().unwrap();
+        if slot.is_some() {
+            return Err("A set-up request is already waiting for the user in Backer. Ask them to finish or dismiss it.".into());
+        }
+        *slot = Some(suggested_name.unwrap_or("").trim().chars().take(80).collect());
+        Ok(json!({"status": "waiting_for_user", "message": "Backer is asking the user to choose the folders, NAS destination and schedule. Nothing has been created yet; check list_jobs later."}))
+    }
 }
 
 fn set_paused(a: &Arc<Agent>, id: JobId, p: bool) -> std::result::Result<Value, String> {
@@ -275,10 +285,13 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "pause_job" => ctl.pause_job(need()?),
             "resume_job" => ctl.resume_job(need()?),
             "delete_job" => agent.delete_job(need()?, None),
+            "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
+            "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
             "save_job" => {
                 let mut job: Job = serde_json::from_value(p.get("job").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
                 let id = agent.store().map_err(es)?.save_job(&mut job).map_err(es)?;
+                *agent.new_job_request.lock().unwrap() = None; // the user has set up a job, so any waiting request is done
                 Ok(json!({"job_id": id}))
             }
             "check_destination" => {
@@ -394,6 +407,25 @@ mod tests {
         ctl.delete_job(t.id, "j").unwrap();
         assert!(t.agent.store().unwrap().get_job(t.id).unwrap().is_none());
         assert!(t.dst.join("mac/src/a").exists(), "NAS file must remain");
+    }
+
+    #[test]
+    fn assistant_create_job_only_leaves_a_request_for_the_user() {
+        let t = setup();
+        let ctl = AgentControl(t.agent.clone());
+        let before = t.agent.store().unwrap().list_jobs().unwrap().len();
+        assert_eq!(ctl.create_job(Some("Photos")).unwrap()["status"], "waiting_for_user");
+        assert_eq!(t.agent.store().unwrap().list_jobs().unwrap().len(), before, "no job is created by the assistant");
+        assert!(ctl.create_job(None).unwrap_err().contains("already waiting"));
+        let r = handle_ui(&t.agent, &json!({"method":"new_job_request"}));
+        assert_eq!(r["result"]["request"], "Photos");
+        handle_ui(&t.agent, &json!({"method":"dismiss_new_job_request"}));
+        assert!(handle_ui(&t.agent, &json!({"method":"new_job_request"}))["result"]["request"].is_null());
+        // Saving a job in the app also clears a waiting request.
+        ctl.create_job(None).unwrap();
+        let job = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
+        handle_ui(&t.agent, &json!({"method":"save_job","params":{"job": job}}));
+        assert!(handle_ui(&t.agent, &json!({"method":"new_job_request"}))["result"]["request"].is_null());
     }
 
     #[test]

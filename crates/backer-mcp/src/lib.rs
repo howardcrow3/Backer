@@ -3,8 +3,9 @@
 use backer_core::{JobId, Schedule};
 use serde_json::{json, Value};
 
-/// What a connected assistant is allowed to do. It can forget a whole job (`delete_job`, which never touches NAS files),
-/// but has no way to remove NAS files, create jobs, or edit folders and destinations.
+/// What a connected assistant is allowed to do. It can forget a whole job (`delete_job`, which never touches NAS files)
+/// and ask the user to set up a new one (`create_job`: the user picks the folders, NAS and times in the app).
+/// It has no way to remove NAS files or to choose or edit folders and destinations.
 pub trait Control: Send + Sync {
     fn list_jobs(&self) -> Result<Value, String>;
     fn get_job(&self, id: JobId) -> Result<Value, String>;
@@ -17,10 +18,13 @@ pub trait Control: Send + Sync {
     fn resume_job(&self, id: JobId) -> Result<Value, String>;
     /// Removes the job and its history. `job_name` must match the job's exact name. NAS files are never touched.
     fn delete_job(&self, id: JobId, job_name: &str) -> Result<Value, String>;
+    /// Asks the user, in the app, to set up a new job. The assistant supplies at most a suggested name;
+    /// the user chooses the source folders, the NAS destination and the schedule. Nothing is created until the user confirms.
+    fn create_job(&self, suggested_name: Option<&str>) -> Result<Value, String>;
 }
 
-pub const TOOL_NAMES: [&str; 10] = [
-    "list_jobs", "get_job", "list_runs", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job", "delete_job",
+pub const TOOL_NAMES: [&str; 11] = [
+    "list_jobs", "get_job", "list_runs", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job", "delete_job", "create_job",
 ];
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str]) -> Value {
@@ -44,6 +48,8 @@ pub fn tool_list() -> Value {
         tool("resume_job", "Resume scheduled runs of a job.", id, &["job_id"]),
         tool("delete_job", "Delete a backup job and its history so it never runs again. Files already backed up on the NAS are NOT deleted. Cannot be undone. job_name must be the job's exact name (see get_job). Fails while the job is running.",
             json!({"job_id": {"type":"integer"}, "job_name": {"type":"string"}}), &["job_id","job_name"]),
+        tool("create_job", "Ask the user to set up a new backup job. This does not create anything by itself: Backer shows the user a prompt and the USER chooses which folders to back up, which NAS folder to use and the schedule times. Do not ask for or pass folders, paths or times; you can only suggest a name. Returns immediately with status waiting_for_user; use list_jobs later to see whether the job was created.",
+            json!({"suggested_name": {"type":"string"}}), &[]),
     ])
 }
 
@@ -86,6 +92,7 @@ fn call_tool(c: &dyn Control, name: &str, a: &Value) -> Result<Value, String> {
         "pause_job" => c.pause_job(job()?),
         "resume_job" => c.resume_job(job()?),
         "delete_job" => c.delete_job(job()?, a.get("job_name").and_then(Value::as_str).ok_or("job_name required")?),
+        "create_job" => c.create_job(a.get("suggested_name").and_then(Value::as_str)),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -135,15 +142,29 @@ mod tests {
         fn pause_job(&self, _: JobId) -> Result<Value, String> { Ok(json!({})) }
         fn resume_job(&self, _: JobId) -> Result<Value, String> { Ok(json!({})) }
         fn delete_job(&self, id: JobId, n: &str) -> Result<Value, String> { self.0.lock().unwrap().push(format!("delete {id} {n}")); Ok(json!({"deleted": true})) }
+        fn create_job(&self, n: Option<&str>) -> Result<Value, String> { self.0.lock().unwrap().push(format!("create {n:?}")); Ok(json!({"status": "waiting_for_user"})) }
     }
 
     #[test]
-    fn exactly_the_ten_tools_and_only_one_can_delete_and_only_a_job() {
+    fn exactly_the_eleven_tools_create_job_takes_no_paths_or_times() {
         let names: Vec<String> = tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, TOOL_NAMES);
-        // No file removal, no review-list actions, no creating jobs. The one delete forgets a job, never NAS files.
-        assert!(!names.iter().any(|n| n.contains("remove") || n.contains("create") || n.contains("keep") || n.contains("destination")));
+        // No file removal, no review-list actions, no destination editing. The one delete forgets a job, never NAS files.
+        assert!(!names.iter().any(|n| n.contains("remove") || n.contains("keep") || n.contains("destination") || n.contains("update") || n.contains("edit")));
+        // create_job can only suggest a name: it has no way to pass folders, paths, destinations or times.
+        let cj = tool_list().as_array().unwrap().iter().find(|t| t["name"] == "create_job").unwrap().clone();
+        let props: Vec<&String> = cj["inputSchema"]["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(props, ["suggested_name"]);
         assert_eq!(names.iter().filter(|n| n.contains("delete")).collect::<Vec<_>>(), ["delete_job"]);
+    }
+
+    #[test]
+    fn create_job_only_forwards_a_suggested_name() {
+        let f = Fake::default();
+        let call = |args: Value| handle(&f, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_job","arguments":args}})).unwrap();
+        assert!(call(json!({"suggested_name":"Photos","folders":[{"source":"/etc","dest":"x"}],"dest_root":"/Volumes/b","kind":"daily"}))["result"].get("isError").is_none());
+        assert!(call(json!({}))["result"].get("isError").is_none());
+        assert_eq!(*f.0.lock().unwrap(), ["create Some(\"Photos\")", "create None"]);
     }
 
     #[test]
