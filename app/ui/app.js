@@ -62,7 +62,7 @@ async function renderDetail(id) {
   const [j, runs] = await Promise.all([call('get_job', { job_id: id }), call('list_runs', { job_id: id, limit: 15 })]);
   const rr = runs.map(r => `<tr><td>${fmtTime(r.started)}</td><td>${r.stats.copied}</td><td>${r.status === 'ok' ? '<span class="pill ok">OK</span>' : r.status === 'failed' ? `<span class="pill bad-p">Failed</span> ${esc(r.message || '')}` : `<span class="pill warn">${esc(r.status)}</span>`}</td><td><button class="link" data-log="${r.id}">Log</button></td></tr>`).join('');
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / ${esc(j.job.name)}</div>
-    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button class="pri" data-run="${id}">Run now</button></div>
+    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
     <h2>Run history</h2><table><thead><tr><th>Started</th><th>Copied</th><th>Result</th><th></th></tr></thead><tbody>${rr}</tbody></table><div id="log"></div>`;
 }
@@ -155,12 +155,25 @@ function wizard() {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-open],[data-back],[data-test],[data-log],[data-approve],[data-revoke],[data-go]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-log],[data-approve],[data-revoke],[data-go]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
   else if (ds.open) { detailId = +ds.open; }
   else if (ds.back !== undefined) { detailId = null; }
+  else if (ds.delete) {
+    const d = $('#dlg'), id = +ds.delete;
+    const j = await call('get_job', { job_id: id });
+    d.innerHTML = `<h1 style="font-size:18px">Delete “${esc(j.job.name)}”?</h1>
+      <p>This removes the job and its history from Backer. It will not run again.</p>
+      <p><b>Nothing is deleted from your NAS or your Mac.</b> Files already backed up stay on the NAS where they are.</p>
+      <div class="row" style="justify-content:flex-end"><button id="c">Cancel</button><button class="bad" id="go">Delete job</button></div>`;
+    d.showModal(); $('#c', d).onclick = () => d.close();
+    $('#go', d).onclick = async () => {
+      try { await call('delete_job', { job_id: id }); d.close(); view = 'jobs'; detailId = null; render(); toast('Job deleted. Files on the NAS were left alone.'); }
+      catch (e) { d.close(); toast('Could not delete the job: ' + (e && e.message || e), true); }
+    };
+  }
   else if (ds.test) {
     const b = t; const label = b.textContent; b.disabled = true; b.textContent = 'Testing…';
     try { const r = await call('test_connection', { job_id: +ds.test }); toast(r.ok ? 'The NAS is reachable.' : (r.error || 'The NAS could not be reached.'), !r.ok); }

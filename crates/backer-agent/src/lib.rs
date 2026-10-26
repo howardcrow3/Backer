@@ -250,6 +250,16 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "run_job" => ctl.run_job(need()?),
             "pause_job" => ctl.pause_job(need()?),
             "resume_job" => ctl.resume_job(need()?),
+            // App only (assistants cannot do this). Forgets the job; nothing is removed from the NAS or the Mac.
+            "delete_job" => {
+                let id = need()?;
+                if agent.is_running(id) {
+                    return Err("This job is running. Stop it first, then delete it.".into());
+                }
+                agent.cancel_job(id); // drops it from the queue if it was waiting
+                agent.store().map_err(es)?.delete_job(id).map_err(es)?;
+                Ok(json!({"ok": true}))
+            }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
             "save_job" => {
                 let mut job: Job = serde_json::from_value(p.get("job").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
@@ -337,6 +347,24 @@ mod tests {
         assert_eq!(r["result"][0]["outcome"], "Removed");
         assert_eq!(r["result"][1]["outcome"], "NotListed");
         assert!(!t.dst.join("mac/src/b").exists() && t.dst.join("mac/src/a").exists());
+    }
+
+    #[test]
+    fn deleting_a_job_forgets_it_but_never_touches_the_nas() {
+        let t = setup();
+        fs::write(t.src.join("a"), b"1").unwrap();
+        t.agent.start_job(t.id).unwrap();
+        let on_nas = t.dst.join("mac/src/a");
+        assert!(on_nas.exists());
+        let r = handle_ui(&t.agent, &json!({"method":"delete_job","params":{"job_id": t.id}}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(t.agent.store().unwrap().get_job(t.id).unwrap().is_none());
+        assert_eq!(handle_ui(&t.agent, &json!({"method":"list_jobs"}))["result"].as_array().unwrap().len(), 0);
+        assert!(on_nas.exists(), "the backed-up file must still be on the NAS");
+        assert!(t.src.join("a").exists());
+        // deleting again is a clear error, not a crash
+        let again = handle_ui(&t.agent, &json!({"method":"delete_job","params":{"job_id": t.id}}));
+        assert_eq!(again["ok"], true);
     }
 
     #[test]

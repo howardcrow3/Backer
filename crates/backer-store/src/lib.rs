@@ -65,6 +65,17 @@ impl Store {
         let j: Option<String> = self.conn.query_row("SELECT json FROM jobs WHERE id=?1", [id], |r| r.get(0)).optional().map_err(se)?;
         j.map(|s| serde_json::from_str(&s).map_err(|e| Error::Store(e.to_string()))).transpose()
     }
+    /// Forgets a job and everything recorded about it (runs, logs, file records, review lists).
+    /// Only the local database changes; files already on the NAS are not touched.
+    pub fn delete_job(&self, id: JobId) -> Result<()> {
+        let tx = self.conn.unchecked_transaction().map_err(se)?;
+        tx.execute("DELETE FROM run_log WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
+        for t in ["runs", "files", "deleted", "kept"] {
+            tx.execute(&format!("DELETE FROM {t} WHERE job_id=?1"), [id]).map_err(se)?;
+        }
+        tx.execute("DELETE FROM jobs WHERE id=?1", [id]).map_err(se)?;
+        tx.commit().map_err(se)
+    }
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let mut st = self.conn.prepare("SELECT json FROM jobs ORDER BY id").map_err(se)?;
         let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(se)?;
@@ -215,6 +226,30 @@ mod tests {
         s.mark_seen(1, "mac/a/x", 3).unwrap();
         assert_eq!(s.flag_missing(1, "mac/a", 3, 101).unwrap(), 0);
         assert!(s.list_deleted(None).unwrap().iter().all(|d| d.dest_path != "mac/a/y"));
+    }
+
+    #[test]
+    fn deleting_a_job_removes_only_that_jobs_records() {
+        let s = Store::open_memory().unwrap();
+        let (mut a, mut b) = (job(), job());
+        let (ia, ib) = (s.save_job(&mut a).unwrap(), s.save_job(&mut b).unwrap());
+        let rec = FileRec { size: 3, mtime: 1, hash: "h".into() };
+        for id in [ia, ib] {
+            let run = s.begin_run(id, 10).unwrap();
+            s.log(run, 1, "copied", "x", None).unwrap();
+            s.upsert_file(id, "mac/a/x", &rec, run).unwrap();
+            s.flag_missing(id, "mac/a", run + 1, 100).unwrap();
+            s.keep_deleted(id, "mac/a/x").unwrap();
+        }
+        s.delete_job(ia).unwrap();
+        assert!(s.get_job(ia).unwrap().is_none());
+        assert!(s.list_runs(ia, 10).unwrap().is_empty());
+        assert!(s.get_file(ia, "mac/a/x").unwrap().is_none());
+        assert!(s.list_deleted(Some(ia)).unwrap().is_empty());
+        // the other job is untouched
+        assert!(s.get_job(ib).unwrap().is_some());
+        assert_eq!(s.list_runs(ib, 10).unwrap().len(), 1);
+        assert!(s.get_file(ib, "mac/a/x").unwrap().is_some());
     }
 
     #[test]

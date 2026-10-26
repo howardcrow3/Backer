@@ -95,3 +95,4 @@ input[type=checkbox]{accent-color:var(--brand)}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:560px;padding:12px var(--space-4);border-radius:var(--radius-md);font-size:14px;box-shadow:var(--shadow-md);z-index:50;cursor:pointer;display:none}
 #toast.good{background:var(--brand);color:var(--on-brand)}
 #toast.bad{background:var(--danger-solid);color:var(--on-danger)}
+button.danger-o{color:var(--danger)}
