@@ -107,7 +107,7 @@ mod tests {
         let ident = clients[0].0.clone();
         handle_ui_ext(&agent, &json!({"method":"approve_mcp_client","params":{"identity": ident}}));
         let r = rpc(&mut c, list.clone());
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 9);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 10);
         handle_ui_ext(&agent, &json!({"method":"revoke_mcp_client","params":{"identity": ident}}));
         assert_eq!(rpc(&mut c, list)["error"]["code"], -32001);
     }

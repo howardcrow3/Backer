@@ -67,7 +67,7 @@ fn assistant_through_the_bridge_needs_approval_then_works() {
     assert_eq!(ui(d.path(), "approve_mcp_client", json!({"identity": ident}))["ok"], true);
 
     let r = rpc(list.clone());
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 10);
     let init = rpc(json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}));
     assert!(init["result"]["serverInfo"].is_object());
 

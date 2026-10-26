@@ -3,7 +3,8 @@
 use backer_core::{JobId, Schedule};
 use serde_json::{json, Value};
 
-/// What a connected assistant is allowed to do. Deliberately has no delete, no create, and no folder or destination editing.
+/// What a connected assistant is allowed to do. It can forget a whole job (`delete_job`, which never touches NAS files),
+/// but has no way to remove NAS files, create jobs, or edit folders and destinations.
 pub trait Control: Send + Sync {
     fn list_jobs(&self) -> Result<Value, String>;
     fn get_job(&self, id: JobId) -> Result<Value, String>;
@@ -14,10 +15,12 @@ pub trait Control: Send + Sync {
     fn set_schedule(&self, id: JobId, schedule: Schedule) -> Result<Value, String>;
     fn pause_job(&self, id: JobId) -> Result<Value, String>;
     fn resume_job(&self, id: JobId) -> Result<Value, String>;
+    /// Removes the job and its history. `job_name` must match the job's exact name. NAS files are never touched.
+    fn delete_job(&self, id: JobId, job_name: &str) -> Result<Value, String>;
 }
 
-pub const TOOL_NAMES: [&str; 9] = [
-    "list_jobs", "get_job", "list_runs", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job",
+pub const TOOL_NAMES: [&str; 10] = [
+    "list_jobs", "get_job", "list_runs", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job", "delete_job",
 ];
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str]) -> Value {
@@ -39,6 +42,8 @@ pub fn tool_list() -> Value {
             "days": {"type":"array", "items": {"type":"integer", "minimum":1, "maximum":7}}}), &["job_id","kind"]),
         tool("pause_job", "Pause scheduled runs of a job.", id.clone(), &["job_id"]),
         tool("resume_job", "Resume scheduled runs of a job.", id, &["job_id"]),
+        tool("delete_job", "Delete a backup job and its history so it never runs again. Files already backed up on the NAS are NOT deleted. Cannot be undone. job_name must be the job's exact name (see get_job). Fails while the job is running.",
+            json!({"job_id": {"type":"integer"}, "job_name": {"type":"string"}}), &["job_id","job_name"]),
     ])
 }
 
@@ -80,6 +85,7 @@ fn call_tool(c: &dyn Control, name: &str, a: &Value) -> Result<Value, String> {
         "set_schedule" => c.set_schedule(job()?, parse_schedule(a)?),
         "pause_job" => c.pause_job(job()?),
         "resume_job" => c.resume_job(job()?),
+        "delete_job" => c.delete_job(job()?, a.get("job_name").and_then(Value::as_str).ok_or("job_name required")?),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -128,13 +134,16 @@ mod tests {
         fn set_schedule(&self, id: JobId, s: Schedule) -> Result<Value, String> { self.0.lock().unwrap().push(format!("sched {id} {s:?}")); Ok(json!({})) }
         fn pause_job(&self, _: JobId) -> Result<Value, String> { Ok(json!({})) }
         fn resume_job(&self, _: JobId) -> Result<Value, String> { Ok(json!({})) }
+        fn delete_job(&self, id: JobId, n: &str) -> Result<Value, String> { self.0.lock().unwrap().push(format!("delete {id} {n}")); Ok(json!({"deleted": true})) }
     }
 
     #[test]
-    fn exactly_the_nine_tools_and_none_can_delete() {
+    fn exactly_the_ten_tools_and_only_one_can_delete_and_only_a_job() {
         let names: Vec<String> = tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, TOOL_NAMES);
-        assert!(!names.iter().any(|n| n.contains("delete") || n.contains("remove") || n.contains("create")));
+        // No file removal, no review-list actions, no creating jobs. The one delete forgets a job, never NAS files.
+        assert!(!names.iter().any(|n| n.contains("remove") || n.contains("create") || n.contains("keep") || n.contains("destination")));
+        assert_eq!(names.iter().filter(|n| n.contains("delete")).collect::<Vec<_>>(), ["delete_job"]);
     }
 
     #[test]

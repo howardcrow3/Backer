@@ -166,6 +166,27 @@ impl Agent {
         }))
     }
 
+    /// Forgets a job and its history. Never touches the NAS or the source folders.
+    /// `expected_name` is required from assistants so a wrong id cannot delete the wrong job.
+    pub fn delete_job(&self, id: JobId, expected_name: Option<&str>) -> std::result::Result<Value, String> {
+        let store = self.store().map_err(es)?;
+        if let Some(job) = store.get_job(id).map_err(es)? {
+            if let Some(n) = expected_name {
+                if n != job.name {
+                    return Err(format!("job {id} is named \"{}\", not \"{n}\". Nothing was deleted.", job.name));
+                }
+            }
+            if self.is_running(id) {
+                return Err("This job is running. Stop it first, then delete it.".into());
+            }
+            self.cancel_job(id); // drops it from the queue if it was waiting
+            store.delete_job(id).map_err(es)?;
+        } else if expected_name.is_some() {
+            return Err(format!("no job {id}"));
+        }
+        Ok(json!({"deleted": true}))
+    }
+
     fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
@@ -222,6 +243,9 @@ impl Control for AgentControl {
     fn resume_job(&self, id: JobId) -> std::result::Result<Value, String> {
         set_paused(&self.0, id, false)
     }
+    fn delete_job(&self, id: JobId, job_name: &str) -> std::result::Result<Value, String> {
+        self.0.delete_job(id, Some(job_name))
+    }
 }
 
 fn set_paused(a: &Arc<Agent>, id: JobId, p: bool) -> std::result::Result<Value, String> {
@@ -250,16 +274,7 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "run_job" => ctl.run_job(need()?),
             "pause_job" => ctl.pause_job(need()?),
             "resume_job" => ctl.resume_job(need()?),
-            // App only (assistants cannot do this). Forgets the job; nothing is removed from the NAS or the Mac.
-            "delete_job" => {
-                let id = need()?;
-                if agent.is_running(id) {
-                    return Err("This job is running. Stop it first, then delete it.".into());
-                }
-                agent.cancel_job(id); // drops it from the queue if it was waiting
-                agent.store().map_err(es)?.delete_job(id).map_err(es)?;
-                Ok(json!({"ok": true}))
-            }
+            "delete_job" => agent.delete_job(need()?, None),
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
             "save_job" => {
                 let mut job: Job = serde_json::from_value(p.get("job").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
@@ -365,6 +380,20 @@ mod tests {
         // deleting again is a clear error, not a crash
         let again = handle_ui(&t.agent, &json!({"method":"delete_job","params":{"job_id": t.id}}));
         assert_eq!(again["ok"], true);
+    }
+
+    #[test]
+    fn assistant_delete_needs_the_exact_name_and_never_touches_the_nas() {
+        let t = setup();
+        fs::write(t.src.join("a"), b"1").unwrap();
+        t.agent.start_job(t.id).unwrap();
+        let ctl = AgentControl(t.agent.clone());
+        assert!(ctl.delete_job(t.id, "wrong name").unwrap_err().contains("Nothing was deleted"));
+        assert!(t.agent.store().unwrap().get_job(t.id).unwrap().is_some());
+        assert!(ctl.delete_job(9999, "j").is_err());
+        ctl.delete_job(t.id, "j").unwrap();
+        assert!(t.agent.store().unwrap().get_job(t.id).unwrap().is_none());
+        assert!(t.dst.join("mac/src/a").exists(), "NAS file must remain");
     }
 
     #[test]
