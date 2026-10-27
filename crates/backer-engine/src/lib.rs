@@ -239,7 +239,7 @@ pub fn run_job_as(
                     lg.ev("warning", &rel, Some(&e.to_string().replace(&*entry.path().to_string_lossy(), "…")), Some(size))?;
                 }
             }
-            if stats.copied % 50 == 0 {
+            if stats.copied.is_multiple_of(50) {
                 progress.update(&stats);
             }
         }
