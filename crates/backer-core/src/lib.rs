@@ -121,13 +121,112 @@ impl RunStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStats {
+    /// Files looked at (excludes folders, excluded names and unreadable folders).
     pub scanned: u64,
+    /// Files copied to the NAS (`new_files` + `updated`).
     pub copied: u64,
     pub bytes: u64,
     pub unchanged: u64,
     pub skipped: u64,
+    /// Files or folders Backer could not read or copy. The rest of the run carries on.
     pub warnings: u64,
     pub newly_deleted: u64,
+    /// Files copied that were not on the NAS before.
+    #[serde(default)]
+    pub new_files: u64,
+    /// Files copied that replaced an older NAS copy.
+    #[serde(default)]
+    pub updated: u64,
+    /// Names or folders skipped by the built-in and user exclude lists.
+    #[serde(default)]
+    pub excluded: u64,
+    /// Problems that stopped the run or a whole source folder (destination not ready, source missing).
+    #[serde(default)]
+    pub errors: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// "manual" or "schedule"; empty for runs recorded before this was tracked.
+    #[serde(default)]
+    pub trigger: String,
+}
+
+/// What started a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Manual,
+    Schedule,
+}
+
+impl Trigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trigger::Manual => "manual",
+            Trigger::Schedule => "schedule",
+        }
+    }
+}
+
+/// One row of a run's file log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRow {
+    pub seq: u64,
+    /// Seconds since the epoch. 0 for rows written before timestamps were recorded.
+    pub ts: i64,
+    /// new, updated, skipped, warning, error, deleted_flagged, or run (a run-level event). Older runs also have "copied".
+    pub kind: String,
+    pub path: String,
+    pub detail: Option<String>,
+    pub size: Option<u64>,
+}
+
+/// Which rows of a run's log to return.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogQuery {
+    /// Only this kind. "attention" means warning, error and skipped together.
+    pub kind: Option<String>,
+    /// Case-insensitive text the path must contain.
+    pub search: Option<String>,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogPage {
+    /// Rows matching the filter, across all pages.
+    pub total: u64,
+    pub rows: Vec<LogRow>,
+}
+
+/// What happened in one source folder during a run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderStat {
+    pub source: String,
+    pub scanned: u64,
+    pub copied: u64,
+    pub bytes: u64,
+    pub issues: u64,
+    pub duration_ms: u64,
+}
+
+/// Warnings, errors or skips with the same cause, for the "needs attention" list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueGroup {
+    pub kind: String,
+    pub cause: String,
+    pub count: u64,
+    /// Up to five example paths.
+    pub sample: Vec<String>,
+}
+
+/// Everything the run screen shows, in one call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunReport {
+    pub run: RunSummary,
+    pub folders: Vec<FolderStat>,
+    /// Log rows per kind. Empty once the detailed log has been pruned.
+    pub counts: std::collections::BTreeMap<String, u64>,
+    pub issues: Vec<IssueGroup>,
+    pub log_rows: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

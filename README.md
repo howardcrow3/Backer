@@ -11,7 +11,7 @@ Backs up chosen folders to a NAS on a schedule. Never deletes NAS files without 
 | `crates/backer-engine` | scan, diff, copy (temp file, verify, atomic rename), flag missing files |
 | `crates/backer-removal` | the only code that can delete from the NAS, only reviewed files |
 | `crates/backer-sched` | schedule maths, DST-safe, catch-up after sleep |
-| `crates/backer-mcp` | MCP server logic, eleven tools; cannot depend on engine/removal/store |
+| `crates/backer-mcp` | MCP server logic, twelve tools; cannot depend on engine/removal/store |
 | `crates/backer-agent` | background agent: scheduler, `ui.sock`, `mcp.sock`, approvals, LaunchAgent plist |
 | `app/` | Tauri 2 menu-bar app and UI (excluded from the workspace; build on a Mac) |
 
