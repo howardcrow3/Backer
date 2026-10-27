@@ -5,6 +5,12 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtTime = s => s ? new Date(s * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
 const fmtBytes = n => n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n > 1e3 ? (n / 1e3).toFixed(0) + ' KB' : n + ' B';
+const fmtN = n => Number(n || 0).toLocaleString();
+const fmtClock = s => s ? new Date(s * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '—';
+const fmtDur = ms => { const t = Math.round((ms || 0) / 1000); if (!t) return ms ? '<1s' : '—'; const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), x = t % 60; return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(x).padStart(2, '0')}s` : `${x}s`; };
+const runMs = r => r.stats.duration_ms || (r.finished ? (r.finished - r.started) * 1000 : 0);
+const triggerText = t => ({ schedule: 'Started by schedule', manual: 'Started by you' }[t] || '');
+const isDest = m => /^destination not ready/i.test(m || '');
 const isWin = /Windows/.test(navigator.userAgent);
 const base = p => p.split(/[\\/]/).filter(Boolean).pop() || 'folder';
 const schedText = s => ({ manual: 'Run now only', every_hours: `Every ${s.hours} h`, daily: `Daily at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`, weekly: `Weekly at ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}` }[s.kind]);
@@ -17,6 +23,10 @@ function toast(msg, bad) {
 }
 
 let view = 'jobs', detailId = null, timer = null;
+// Run screen state. Kept here so the 3-second refresh and "Load more" don't lose the filter or the rows already shown.
+let runId = null, runLive = false, histLimit = 15, histFilter = 'all';
+const PAGE = 200;
+let logState = { kind: 'all', search: '', rows: [], total: 0 };
 
 function statusPill(j) {
   const r = j.last_run;
@@ -48,7 +58,7 @@ async function render() {
     await showRequest();
     const pending = jobs.reduce((n, j) => n + j.pending_deleted, 0);
     const b = $('#badge'); b.hidden = !pending; b.textContent = pending;
-    if (view === 'jobs') return detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
+    if (view === 'jobs') return runId ? await renderRun(runId) : detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
     if (view === 'deleted') return await renderDeleted();
     if (view === 'settings') return await renderSettings();
   } catch (e) {
@@ -70,13 +80,131 @@ function renderJobs(jobs, pending) {
   $('#new').onclick = () => wizard();
 }
 
+const stateOf = r => r.status === 'running' ? 'run' : r.status === 'ok' ? 'ok' : r.status === 'failed' ? 'er' : 'wn';
+function resultPill(r) {
+  const s = r.stats, bits = [];
+  if (r.status === 'running') return '<span class="pill run">Running</span>';
+  if (r.status === 'ok') return '<span class="pill ok">Synced</span>';
+  if (r.status === 'failed') return `<span class="pill bad-p">Failed</span> <span class="note">${esc(isDest(r.message) ? 'NAS not reachable' : r.message || '')}</span>`;
+  if (r.status === 'cancelled') return '<span class="pill warn">Cancelled</span> <span class="note">Stopped before it finished</span>';
+  if (s.warnings) bits.push(`${fmtN(s.warnings)} couldn’t be read`);
+  if (s.skipped) bits.push(`${fmtN(s.skipped)} skipped`);
+  return `<span class="pill warn">Warnings</span> <span class="note">${esc(bits.join(' · '))}</span>`;
+}
+const needsAttention = r => r.status !== 'ok' && r.status !== 'running';
+
+function sparkline(runs) {
+  const last = runs.slice(0, 15).reverse(), max = Math.max(1, ...last.map(r => r.stats.copied));
+  return `<div class="spark" role="img" aria-label="Files copied in each of the last ${last.length} runs">${last.map(r => `<i class="${stateOf(r)}" style="height:${Math.max(4, Math.round(r.stats.copied / max * 56))}px" title="${esc(fmtTime(r.started))}: ${fmtN(r.stats.copied)} copied"></i>`).join('')}</div>`;
+}
+
 async function renderDetail(id) {
-  const [j, runs] = await Promise.all([call('get_job', { job_id: id }), call('list_runs', { job_id: id, limit: 15 })]);
-  const rr = runs.map(r => `<tr><td>${fmtTime(r.started)}</td><td>${r.stats.copied}</td><td>${r.status === 'ok' ? '<span class="pill ok">OK</span>' : r.status === 'failed' ? `<span class="pill bad-p">Failed</span> ${esc(r.message || '')}` : `<span class="pill warn">${esc(r.status)}</span>`}</td><td><button class="link" data-log="${r.id}">Log</button></td></tr>`).join('');
+  const [j, runs] = await Promise.all([call('get_job', { job_id: id }), call('list_runs', { job_id: id, limit: Math.max(histLimit, 15) })]);
+  const shown = runs.filter(r => histFilter === 'all' || needsAttention(r)).slice(0, histLimit);
+  const rr = shown.map(r => `<tr class="click" tabindex="0" data-openrun="${r.id}"><td><b>${fmtTime(r.started)}</b></td><td class="num dim">${fmtDur(runMs(r))}</td><td class="num">${fmtN(r.stats.copied)}</td><td class="num">${r.stats.bytes ? fmtBytes(r.stats.bytes) : '—'}</td><td>${resultPill(r)}</td><td class="chev" aria-hidden="true">›</td></tr>`).join('');
+  const last = runs[0];
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / ${esc(j.job.name)}</div>
     <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
-    <h2>Run history</h2><table><thead><tr><th>Started</th><th>Copied</th><th>Result</th><th></th></tr></thead><tbody>${rr}</tbody></table><div id="log"></div>`;
+    ${last ? `<div class="card strip"><div><div class="lbl">Last backup</div><div class="big">${fmtTime(last.started)}</div><div>${resultPill(last)}</div></div><div><div class="lbl">Last ${Math.min(15, runs.length)} runs · taller means more copied</div>${sparkline(runs)}</div></div>` : ''}
+    <div class="row" style="margin-top:24px"><h2 style="flex:1;margin:0">Run history</h2><span class="chips"><button class="chip ${histFilter === 'all' ? 'on' : ''}" data-hist="all">All</button><button class="chip ${histFilter === 'attention' ? 'on' : ''}" data-hist="attention">Needs attention</button></span></div>
+    ${rr ? `<table class="hist" style="margin-top:8px"><thead><tr><th>Started</th><th class="num">Duration</th><th class="num">Copied</th><th class="num">Size</th><th>Result</th><th></th></tr></thead><tbody>${rr}</tbody></table>` : `<div class="card">${runs.length ? 'No runs needed attention.' : 'No runs yet.'}</div>`}
+    ${runs.length >= histLimit ? '<div style="text-align:center;margin-top:12px"><button data-histmore>Show older runs</button></div>' : ''}`;
+}
+
+// ---- One run: summary first, then the file log
+const KIND_LABEL = { new: 'New', updated: 'Updated', copied: 'Copied', skipped: 'Skipped', warning: 'Warning', error: 'Error', deleted_flagged: 'Flagged', run: 'Event' };
+const KIND_CLASS = { new: 'new', updated: 'upd', copied: 'upd', skipped: 'warn', warning: 'warn', error: 'bad-p', deleted_flagged: 'info', run: 'info' };
+const CHIPS = [['all', 'All'], ['new', 'New'], ['updated', 'Updated'], ['copied', 'Copied'], ['skipped', 'Skipped'], ['warning', 'Warnings'], ['error', 'Errors'], ['deleted_flagged', 'Flagged'], ['run', 'Events']];
+const HINTS = {
+  'Permission denied': 'Backer can’t read them, so they weren’t backed up. Check their permissions on this computer.',
+  'Larger than the size limit': 'They weren’t backed up because they are bigger than this job’s file size limit.',
+  'File vanished during backup': 'They were removed or moved while Backer was copying. The next run will pick up the new location.',
+  'Source folder is not available': 'Check that the drive or folder is connected, then run again. Nothing on the NAS was flagged as deleted.'
+};
+const tile = (label, val, sub, cls = '') => `<div class="card tile"><span class="lbl">${label}</span><span class="fig ${cls}">${val}</span>${sub ? `<span class="lbl">${sub}</span>` : ''}</div>`;
+
+function issueHtml(g, jobId) {
+  const err = g.kind === 'error', n = g.count, dest = err && isDest(g.cause);
+  const why = dest ? g.cause.replace(/^destination not ready:?\s*/i, '') : '';
+  const title = dest ? 'Can’t reach your NAS' : err ? esc(g.cause) : `${fmtN(n)} file${n === 1 ? '' : 's'} · ${esc(g.cause || (g.kind === 'skipped' ? 'Skipped' : 'Problem'))}`;
+  const hint = dest ? `${why ? why.charAt(0).toUpperCase() + why.slice(1) + '. ' : ''}Check that the NAS is on and you are on the same network.` : (HINTS[g.cause] || '');
+  const act = dest ? `<button data-test="${jobId}">Test NAS</button>` : '';
+  const more = n > g.sample.length ? `<div class="lbl">and ${fmtN(n - g.sample.length)} more. <a href="#" data-chip="${g.kind}">Show them in the file log</a></div>` : '';
+  const files = g.sample.filter(Boolean).length ? `<div class="samples">${g.sample.filter(Boolean).map(p => `<div class="mono">${esc(p)}</div>`).join('')}${more}</div>` : '';
+  return `<details class="issue"><summary><span class="ic ${err ? 'er' : 'wn'}">${err ? '!' : '▲'}</span><span class="grow"><b>${title}</b>${hint ? `<span class="lbl block">${esc(hint)}</span>` : ''}</span>${act}<span class="chev" aria-hidden="true">›</span></summary>${files}</details>`;
+}
+
+async function renderRun(id) {
+  const rep = await call('get_run_summary', { run_id: id });
+  const r = rep.run, s = r.stats, j = await call('get_job', { job_id: r.job_id });
+  runLive = r.status === 'running';
+  const nothing = !s.scanned && !s.copied && !s.unchanged;
+  const sec = runMs(r) / 1000, issues = s.warnings + s.skipped + s.errors;
+  let banner;
+  if (runLive) banner = ['run', 'Running now', 'This page updates while the backup runs.'];
+  else if (r.status === 'ok') banner = ['ok', 'Backed up with nothing to look at', `${fmtN(s.copied)} file${s.copied === 1 ? '' : 's'} copied, ${fmtN(s.unchanged)} already on your NAS. Nothing was removed from it.`];
+  else if (r.status === 'warnings') banner = ['wn', `Finished with ${fmtN(issues)} thing${issues === 1 ? '' : 's'} to look at`, `Everything else was copied. ${fmtN(s.copied)} file${s.copied === 1 ? '' : 's'} are now on your NAS, and nothing was removed from it.`];
+  else if (r.status === 'cancelled') banner = ['wn', 'Stopped before it finished', `${fmtN(s.copied)} file${s.copied === 1 ? '' : 's'} were copied and are safe on your NAS. Nothing was removed from it.`];
+  else banner = ['er', isDest(r.message) ? 'Backup didn’t run: your NAS wasn’t reachable' : 'Backup didn’t finish', s.copied ? `${fmtN(s.copied)} files were copied before it stopped. Nothing was removed from your NAS.` : 'Nothing was copied and nothing was removed from your NAS. Backer will try again at the next scheduled time.'];
+  const sub = [triggerText(s.trigger), runLive ? '' : `took ${fmtDur(runMs(r)) === '—' ? 'under a second' : fmtDur(runMs(r))}`, r.finished ? `finished ${fmtClock(r.finished)}` : ''].filter(Boolean).join(' · ');
+  const dash = v => nothing ? '—' : v;
+  const tiles = [
+    tile('Copied', dash(fmtN(s.copied)), s.new_files || s.updated ? `${fmtN(s.new_files)} new · ${fmtN(s.updated)} updated` : ''),
+    tile('Unchanged', dash(fmtN(s.unchanged))),
+    tile('Skipped', dash(fmtN(s.skipped)), s.skipped ? 'too large' : '', s.skipped ? 'wn' : ''),
+    s.errors ? tile('Errors', fmtN(s.errors), 'stopped the run', 'er') : tile('Warnings', dash(fmtN(s.warnings)), s.warnings ? 'couldn’t be read' : '', s.warnings ? 'wn' : ''),
+    tile('Excluded', dash(fmtN(s.excluded)), s.excluded ? 'left out by name' : ''),
+    tile('Data sent', s.bytes ? fmtBytes(s.bytes) : '—', s.bytes && sec >= 1 ? `${fmtBytes(s.bytes / sec)}/s average` : '')
+  ].join('');
+  const flagged = s.newly_deleted ? `<div class="issue flat"><span class="ic info">i</span><span class="grow"><b>${fmtN(s.newly_deleted)} file${s.newly_deleted === 1 ? '' : 's'} flagged as deleted on this computer</b><span class="lbl block">Still on your NAS. Backer won’t remove them unless you say so.</span></span><button data-go="deleted">Review…</button></div>` : '';
+  const attention = rep.issues.map(g => issueHtml(g, r.job_id)).join('') + flagged;
+  const folders = rep.folders.length ? `<h2>By folder</h2><table class="num-table"><thead><tr><th>Folder</th><th class="num">Scanned</th><th class="num">Copied</th><th class="num">Size</th><th class="num">Issues</th><th class="num">Time</th></tr></thead><tbody>${rep.folders.map(f => `<tr><td class="mono">${esc(f.source)}</td><td class="num">${fmtN(f.scanned)}</td><td class="num">${fmtN(f.copied)}</td><td class="num">${f.bytes ? fmtBytes(f.bytes) : '—'}</td><td class="num ${f.issues ? 'wn-t' : 'dim'}">${fmtN(f.issues)}</td><td class="num dim">${fmtDur(f.duration_ms)}</td></tr>`).join('')}</tbody></table>` : '';
+  const chips = CHIPS.filter(([k]) => k === 'all' || rep.counts[k]).map(([k, l]) => `<button class="chip ${logState.kind === k ? 'on' : ''}" data-chip="${k}">${l} <b>${fmtN(k === 'all' ? rep.log_rows : rep.counts[k])}</b></button>`).join('');
+  const pruned = !rep.log_rows && !runLive && (s.copied || s.skipped || s.warnings || s.errors);
+  $('#main').innerHTML = `<div class="sub"><a href="#" data-back-run>${esc(j.job.name)}</a></div>
+    <div class="row"><h1 style="flex:1">Run on ${fmtTime(r.started)}</h1>${rep.log_rows ? '<button data-export>Export log</button>' : ''}<button class="pri" data-run="${r.job_id}">Back up again</button></div>
+    <div class="sub">${esc(sub)}</div>
+    <div class="banner2 ${banner[0]}"><b>${esc(banner[1])}</b><span>${esc(banner[2])}</span></div>
+    <div class="tiles">${tiles}</div>
+    <h2>Needs attention</h2><div class="card list">${attention || '<div class="empty">Nothing needs attention.</div>'}</div>
+    ${folders}
+    <h2>File log</h2>
+    ${pruned ? `<div class="card">The file-by-file log for this run was removed to save space. Backer keeps it for each job’s latest runs. The summary above is kept.</div>` : `<div class="card list">
+      <div class="logbar"><span class="chips">${chips}</span><input id="q" type="search" placeholder="Search paths…" value="${esc(logState.search)}" aria-label="Search paths"></div>
+      <div id="logrows"></div></div>`}`;
+  if (!pruned) await loadLog(true);
+}
+
+function logRowHtml(r) {
+  const size = r.size != null ? fmtBytes(r.size) : '';
+  const main = r.path || r.detail || '';
+  const right = r.path ? [size, r.detail].filter(Boolean).join(' · ') : size;
+  return `<div class="lrow"><span class="mono dim t">${fmtClock(r.ts)}</span><span class="pill2 ${KIND_CLASS[r.kind] || 'info'}">${KIND_LABEL[r.kind] || esc(r.kind)}</span><span class="mono p" title="${esc(main)}">${esc(main)}</span><span class="mono dim d">${esc(right)}</span></div>`;
+}
+
+async function loadLog(reset) {
+  const box = $('#logrows'); if (!box) return;
+  if (reset) logState.rows = [];
+  const q = { run_id: runId, kind: logState.kind, search: logState.search, offset: logState.rows.length, limit: PAGE };
+  const page = await call('get_run_log', q);
+  logState.rows = logState.rows.concat(page.rows); logState.total = page.total;
+  const left = page.total - logState.rows.length;
+  box.innerHTML = logState.rows.length
+    ? `${logState.rows.map(logRowHtml).join('')}<div class="logfoot"><span class="lbl">Showing ${fmtN(logState.rows.length)} of ${fmtN(page.total)}</span>${left > 0 ? `<button data-more>Load ${fmtN(Math.min(PAGE, left))} more</button>` : ''}</div>`
+    : '<div class="empty">No rows match.</div>';
+}
+
+const csvCell = v => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+async function exportLog() {
+  const out = ['time,kind,path,detail,size_bytes'];
+  for (let offset = 0; ; offset += 1000) {
+    const page = await call('get_run_log', { run_id: runId, offset, limit: 1000 });
+    for (const r of page.rows) out.push([r.ts ? new Date(r.ts * 1000).toISOString() : '', r.kind, r.path, r.detail, r.size ?? ''].map(csvCell).join(','));
+    if (offset + 1000 >= page.total) break;
+  }
+  const saved = await T.core.invoke('save_text_file', { name: `backer-run-${runId}-log.csv`, text: out.join('\n') + '\n' });
+  if (saved) toast('Log saved.');
 }
 
 async function renderDeleted() {
@@ -168,12 +296,19 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-log],[data-approve],[data-revoke],[data-go]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
-  else if (ds.open) { detailId = +ds.open; }
-  else if (ds.back !== undefined) { detailId = null; }
+  else if (ds.open) { detailId = +ds.open; histLimit = 15; histFilter = 'all'; }
+  else if (ds.openrun) { runId = +ds.openrun; logState = { kind: 'all', search: '', rows: [], total: 0 }; }
+  else if (ds.backRun !== undefined) { runId = null; }
+  else if (ds.chip) { logState.kind = ds.chip; await loadLogOrRender(); return; }
+  else if (ds.more !== undefined) { await loadLog(false); return; }
+  else if (ds.export !== undefined) { try { await exportLog(); } catch (e) { toast('Could not save the log: ' + (e && e.message || e), true); } return; }
+  else if (ds.hist) { histFilter = ds.hist; }
+  else if (ds.histmore !== undefined) { histLimit += 15; }
+  else if (ds.back !== undefined) { detailId = null; runId = null; }
   else if (ds.delete) {
     const d = $('#dlg'), id = +ds.delete;
     const j = await call('get_job', { job_id: id });
@@ -193,11 +328,19 @@ document.addEventListener('click', async e => {
     catch (e) { toast('Could not test the NAS: ' + (e && e.message || e), true); }
     finally { b.disabled = false; b.textContent = label; }
   }
-  else if (ds.log) { const rows = await call('get_run_log', { run_id: +ds.log }); $('#log').innerHTML = `<h2>Run log</h2><div class="card mono">${rows.map(r => `${esc(r.kind)} ${esc(r.path)} ${esc(r.detail || '')}`).join('<br>') || 'Nothing logged.'}</div>`; return; }
   else if (ds.approve) { await call('approve_mcp_client', { identity: ds.approve }); }
   else if (ds.revoke) { await call('revoke_mcp_client', { identity: ds.revoke }); }
-  else if (ds.go) { view = ds.go; }
+  else if (ds.go) { view = ds.go; runId = null; detailId = null; }
   render();
 });
-document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v; detailId = null; render(); }));
-render(); timer = setInterval(() => { if (!$('#dlg').open && !$('#log')?.innerHTML) render(); }, 3000);
+// A chip click on the run page redraws the chips and rows without losing the page.
+async function loadLogOrRender() { await renderRun(runId); }
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('tr.click')) e.target.click(); });
+let searchTimer = null;
+document.addEventListener('input', e => {
+  if (e.target.id !== 'q') return;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { logState.search = e.target.value.trim(); loadLog(true); }, 250);
+});
+document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v; detailId = null; runId = null; render(); }));
+render(); timer = setInterval(() => { if (!$('#dlg').open && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);

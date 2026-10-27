@@ -8,7 +8,7 @@ pub mod platform;
 use jiff::{tz::TimeZone, Timestamp};
 use backer_connector::{Connector, MountedConnector};
 use backer_core::*;
-use backer_engine::{run_job, NoProgress};
+use backer_engine::{run_job_as, NoProgress};
 use backer_mcp::Control;
 use backer_store::Store;
 use serde_json::{json, Value};
@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_CONCURRENT: usize = 2;
+/// Runs whose per-file log is kept for each job. Older runs keep their summary but lose the file rows.
+pub const KEEP_LOG_RUNS: u32 = 30;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Start {
@@ -29,7 +31,7 @@ pub enum Start {
 #[derive(Default)]
 struct Running {
     active: HashMap<JobId, Arc<AtomicBool>>,
-    queue: VecDeque<JobId>,
+    queue: VecDeque<(JobId, Trigger)>,
 }
 
 pub struct Agent {
@@ -74,39 +76,44 @@ impl Agent {
     }
 
     pub fn start_job(self: &Arc<Self>, id: JobId) -> Result<Start> {
+        self.start_job_as(id, Trigger::Manual)
+    }
+
+    pub fn start_job_as(self: &Arc<Self>, id: JobId, trigger: Trigger) -> Result<Start> {
         let job = self.store()?.get_job(id)?.ok_or_else(|| Error::Invalid(format!("no job {id}")))?;
         let cancel = {
             let mut st = self.state.lock().unwrap();
-            if st.active.contains_key(&id) || st.queue.contains(&id) {
+            if st.active.contains_key(&id) || st.queue.iter().any(|(j, _)| *j == id) {
                 return Ok(Start::AlreadyRunning);
             }
             if st.active.len() >= MAX_CONCURRENT {
-                st.queue.push_back(id);
+                st.queue.push_back((id, trigger));
                 return Ok(Start::Queued);
             }
             let c = Arc::new(AtomicBool::new(false));
             st.active.insert(id, c.clone());
             c
         };
-        self.spawn_run(job, cancel);
+        self.spawn_run(job, cancel, trigger);
         Ok(Start::Started)
     }
 
-    fn spawn_run(self: &Arc<Self>, job: Job, cancel: Arc<AtomicBool>) {
+    fn spawn_run(self: &Arc<Self>, job: Job, cancel: Arc<AtomicBool>, trigger: Trigger) {
         let me = self.clone();
         let work = move || {
             let _awake = platform::AwakeGuard::new();
             if let Ok(store) = me.store() {
                 let conn = Agent::connector_for(&job);
-                let _ = run_job(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress);
+                let _ = run_job_as(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
+                let _ = store.prune_logs(KEEP_LOG_RUNS);
             }
             let next = {
                 let mut st = me.state.lock().unwrap();
                 st.active.remove(&job.id);
                 st.queue.pop_front()
             };
-            if let Some(n) = next {
-                let _ = me.start_job(n);
+            if let Some((n, t)) = next {
+                let _ = me.start_job_as(n, t);
             }
         };
         if self.sync_runs {
@@ -130,7 +137,7 @@ impl Agent {
 
     pub fn cancel_job(&self, id: JobId) -> bool {
         let mut st = self.state.lock().unwrap();
-        st.queue.retain(|j| *j != id);
+        st.queue.retain(|(j, _)| *j != id);
         match st.active.get(&id) {
             Some(c) => {
                 c.store(true, Ordering::Relaxed);
@@ -150,7 +157,7 @@ impl Agent {
         let mut started = vec![];
         for job in store.list_jobs()? {
             let last = store.last_run_started(job.id)?.and_then(|s| Timestamp::from_second(s).ok());
-            if backer_sched::is_due(&job, last, now, &self.tz) && self.start_job(job.id)? != Start::AlreadyRunning {
+            if backer_sched::is_due(&job, last, now, &self.tz) && self.start_job_as(job.id, Trigger::Schedule)? != Start::AlreadyRunning {
                 started.push(job.id);
             }
         }
@@ -216,9 +223,12 @@ impl Control for AgentControl {
     fn list_runs(&self, id: JobId, limit: u32) -> std::result::Result<Value, String> {
         serde_json::to_value(self.0.store().map_err(es)?.list_runs(id, limit).map_err(es)?).map_err(|e| e.to_string())
     }
-    fn get_run_log(&self, run_id: i64, limit: u32) -> std::result::Result<Value, String> {
-        let rows = self.0.store().map_err(es)?.run_log(run_id, limit).map_err(es)?;
-        Ok(Value::Array(rows.into_iter().map(|(k, p, d)| json!({"kind": k, "path": p, "detail": d})).collect()))
+    fn get_run_log(&self, run_id: i64, q: &LogQuery) -> std::result::Result<Value, String> {
+        let page = self.0.store().map_err(es)?.run_log(run_id, q).map_err(es)?;
+        serde_json::to_value(page).map_err(|e| e.to_string())
+    }
+    fn get_run_summary(&self, run_id: i64) -> std::result::Result<Value, String> {
+        serde_json::to_value(self.0.store().map_err(es)?.run_report(run_id).map_err(es)?).map_err(|e| e.to_string())
     }
     fn test_connection(&self, id: JobId) -> std::result::Result<Value, String> {
         let s = self.0.store().map_err(es)?;
@@ -279,7 +289,8 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "list_jobs" => ctl.list_jobs(),
             "get_job" => ctl.get_job(need()?),
             "list_runs" => ctl.list_runs(need()?, p.get("limit").and_then(Value::as_u64).unwrap_or(20) as u32),
-            "get_run_log" => ctl.get_run_log(p.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?, 500),
+            "get_run_log" => ctl.get_run_log(p.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?, &backer_mcp::log_query(&p, 200)),
+            "get_run_summary" => ctl.get_run_summary(p.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?),
             "test_connection" => ctl.test_connection(need()?),
             "run_job" => ctl.run_job(need()?),
             "pause_job" => ctl.pause_job(need()?),
@@ -375,6 +386,38 @@ mod tests {
         assert_eq!(r["result"][0]["outcome"], "Removed");
         assert_eq!(r["result"][1]["outcome"], "NotListed");
         assert!(!t.dst.join("mac/src/b").exists() && t.dst.join("mac/src/a").exists());
+    }
+
+    #[test]
+    fn run_summary_and_paged_log_are_served_to_the_app_and_assistants() {
+        let t = setup();
+        for i in 0..5 {
+            fs::write(t.src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        t.agent.start_job(t.id).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&t.agent, &json!({"method": m, "params": p}));
+        let run = ui("list_runs", json!({"job_id": t.id}))["result"][0].clone();
+        assert_eq!((run["stats"]["trigger"].as_str(), run["stats"]["new_files"].as_u64()), (Some("manual"), Some(5)));
+        let rid = run["id"].as_i64().unwrap();
+        let sum = ui("get_run_summary", json!({"run_id": rid}));
+        assert_eq!(sum["result"]["run"]["stats"]["copied"], 5);
+        assert_eq!(sum["result"]["folders"][0]["copied"], 5);
+        assert_eq!(sum["result"]["counts"]["new"], 5);
+        let page = ui("get_run_log", json!({"run_id": rid, "kind": "new", "limit": 2, "offset": 1}));
+        assert_eq!((page["result"]["total"].as_u64(), page["result"]["rows"].as_array().unwrap().len()), (Some(5), 2));
+        let found = ui("get_run_log", json!({"run_id": rid, "search": "f3"}));
+        assert_eq!(found["result"]["total"], 1);
+        assert_eq!(ui("get_run_summary", json!({"run_id": 9999}))["ok"], false);
+    }
+
+    #[test]
+    fn scheduled_runs_are_recorded_as_scheduled() {
+        let t = setup();
+        fs::write(t.src.join("a"), b"1").unwrap();
+        AgentControl(t.agent.clone()).set_schedule(t.id, Schedule::EveryHours { hours: 1 }).unwrap();
+        assert_eq!(t.agent.tick(now_ts()).unwrap(), vec![t.id]);
+        let runs = t.agent.store().unwrap().list_runs(t.id, 5).unwrap();
+        assert_eq!(runs[0].stats.trigger, "schedule");
     }
 
     #[test]

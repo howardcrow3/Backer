@@ -54,6 +54,18 @@ fn agent_call(method: String, params: serde_json::Value) -> Result<serde_json::V
 }
 
 /// The JSON an AI assistant needs in its MCP settings to launch the bridge.
+/// Asks where to save a text file (the run log as CSV) and writes it. Async so the blocking dialog never runs on the main thread.
+/// Returns false when the user cancels.
+#[tauri::command]
+async fn save_text_file(app: tauri::AppHandle, name: String, text: String) -> Result<bool, String> {
+    let Some(picked) = app.dialog().file().set_file_name(name).add_filter("CSV", &["csv"]).blocking_save_file() else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 #[tauri::command]
 fn mcp_config() -> Result<String, String> {
     let exe = agent_exe().ok_or("cannot locate the agent")?;
@@ -174,7 +186,7 @@ fn run_all() {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file])
         .setup(|app| {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;

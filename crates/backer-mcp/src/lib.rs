@@ -1,6 +1,6 @@
 //! MCP server logic (JSON-RPC 2.0, protocol 2024-11-05). Transport and client approval live in the agent.
 //! This crate depends only on backer-core: it cannot reach the engine, the store's writers or the removal code.
-use backer_core::{JobId, Schedule};
+use backer_core::{JobId, LogQuery, Schedule};
 use serde_json::{json, Value};
 
 /// What a connected assistant is allowed to do. It can forget a whole job (`delete_job`, which never touches NAS files)
@@ -10,7 +10,10 @@ pub trait Control: Send + Sync {
     fn list_jobs(&self) -> Result<Value, String>;
     fn get_job(&self, id: JobId) -> Result<Value, String>;
     fn list_runs(&self, id: JobId, limit: u32) -> Result<Value, String>;
-    fn get_run_log(&self, run_id: i64, limit: u32) -> Result<Value, String>;
+    /// One page of a run's file log: `{total, rows}`.
+    fn get_run_log(&self, run_id: i64, q: &LogQuery) -> Result<Value, String>;
+    /// Totals, per-folder numbers, log counts and problems grouped by cause for one run.
+    fn get_run_summary(&self, run_id: i64) -> Result<Value, String>;
     fn test_connection(&self, id: JobId) -> Result<Value, String>;
     fn run_job(&self, id: JobId) -> Result<Value, String>;
     fn set_schedule(&self, id: JobId, schedule: Schedule) -> Result<Value, String>;
@@ -23,9 +26,19 @@ pub trait Control: Send + Sync {
     fn create_job(&self, suggested_name: Option<&str>) -> Result<Value, String>;
 }
 
-pub const TOOL_NAMES: [&str; 11] = [
-    "list_jobs", "get_job", "list_runs", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job", "delete_job", "create_job",
+pub const TOOL_NAMES: [&str; 12] = [
+    "list_jobs", "get_job", "list_runs", "get_run_summary", "get_run_log", "test_connection", "run_job", "set_schedule", "pause_job", "resume_job", "delete_job", "create_job",
 ];
+
+/// Reads kind, search, offset and limit from tool or UI arguments. The limit is capped at 1000 rows.
+pub fn log_query(a: &Value, default_limit: u32) -> LogQuery {
+    LogQuery {
+        kind: a.get("kind").and_then(Value::as_str).map(str::to_string),
+        search: a.get("search").and_then(Value::as_str).map(str::to_string),
+        offset: a.get("offset").and_then(Value::as_u64).map(|o| o.min(u32::MAX as u64) as u32).unwrap_or(0),
+        limit: a.get("limit").and_then(Value::as_u64).map(|l| l.min(1000) as u32).unwrap_or(default_limit),
+    }
+}
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str]) -> Value {
     json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": required}})
@@ -37,7 +50,9 @@ pub fn tool_list() -> Value {
         tool("list_jobs", "List backup jobs with status and next run.", json!({}), &[]),
         tool("get_job", "Show one job's folders, destination and schedule.", id.clone(), &["job_id"]),
         tool("list_runs", "Recent runs of a job.", json!({"job_id": {"type":"integer"}, "limit": {"type":"integer"}}), &["job_id"]),
-        tool("get_run_log", "File-level log of one run.", json!({"run_id": {"type":"integer"}, "limit": {"type":"integer"}}), &["run_id"]),
+        tool("get_run_summary", "How one run went: totals, per-folder numbers, and problems grouped by cause. Start here before reading the file log.", json!({"run_id": {"type":"integer"}}), &["run_id"]),
+        tool("get_run_log", "File-level log of one run, a page at a time. Returns {total, rows}. Filter with kind (new, updated, skipped, warning, error, deleted_flagged, run, or attention for warnings, errors and skips) and search (text in the path).",
+            json!({"run_id": {"type":"integer"}, "kind": {"type":"string"}, "search": {"type":"string"}, "offset": {"type":"integer"}, "limit": {"type":"integer"}}), &["run_id"]),
         tool("test_connection", "Check the NAS destination of a job is reachable.", id.clone(), &["job_id"]),
         tool("run_job", "Start a job now.", id.clone(), &["job_id"]),
         tool("set_schedule", "Change a job's schedule. kind: manual | every_hours | daily | weekly.", json!({
@@ -85,7 +100,8 @@ fn call_tool(c: &dyn Control, name: &str, a: &Value) -> Result<Value, String> {
         "list_jobs" => c.list_jobs(),
         "get_job" => c.get_job(job()?),
         "list_runs" => c.list_runs(job()?, lim(20)),
-        "get_run_log" => c.get_run_log(a.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?, lim(200)),
+        "get_run_summary" => c.get_run_summary(a.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?),
+        "get_run_log" => c.get_run_log(a.get("run_id").and_then(Value::as_i64).ok_or("run_id required")?, &log_query(a, 200)),
         "test_connection" => c.test_connection(job()?),
         "run_job" => c.run_job(job()?),
         "set_schedule" => c.set_schedule(job()?, parse_schedule(a)?),
@@ -135,7 +151,8 @@ mod tests {
         fn list_jobs(&self) -> Result<Value, String> { Ok(json!([])) }
         fn get_job(&self, id: JobId) -> Result<Value, String> { Ok(json!({"id": id})) }
         fn list_runs(&self, _: JobId, l: u32) -> Result<Value, String> { Ok(json!({"limit": l})) }
-        fn get_run_log(&self, _: i64, _: u32) -> Result<Value, String> { Ok(json!([])) }
+        fn get_run_log(&self, _: i64, q: &LogQuery) -> Result<Value, String> { Ok(json!({"total": 0, "rows": [], "kind": q.kind, "limit": q.limit, "offset": q.offset})) }
+        fn get_run_summary(&self, id: i64) -> Result<Value, String> { Ok(json!({"run": id})) }
         fn test_connection(&self, _: JobId) -> Result<Value, String> { Ok(json!({"ok": true})) }
         fn run_job(&self, id: JobId) -> Result<Value, String> { self.0.lock().unwrap().push(format!("run {id}")); Ok(json!({"started": true})) }
         fn set_schedule(&self, id: JobId, s: Schedule) -> Result<Value, String> { self.0.lock().unwrap().push(format!("sched {id} {s:?}")); Ok(json!({})) }
@@ -146,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_eleven_tools_create_job_takes_no_paths_or_times() {
+    fn exactly_the_twelve_tools_create_job_takes_no_paths_or_times() {
         let names: Vec<String> = tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, TOOL_NAMES);
         // No file removal, no review-list actions, no destination editing. The one delete forgets a job, never NAS files.
