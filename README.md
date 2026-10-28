@@ -2,6 +2,18 @@
 
 Backs up chosen folders to a NAS on a schedule. Never deletes NAS files without asking.
 
+## Download
+<!-- latest-build:start -->
+**Latest build: [v0.4.0](https://github.com/howardcrow3/Backer/releases/tag/v0.4.0)** (2026-10-27)
+
+| Platform | Download |
+|---|---|
+| macOS, Apple silicon | [Backer_0.4.0_aarch64.dmg](https://github.com/howardcrow3/Backer/releases/download/v0.4.0/Backer_0.4.0_aarch64.dmg) |
+| Windows 10/11, 64-bit | [Backer_0.4.0_x64-setup.exe](https://github.com/howardcrow3/Backer/releases/download/v0.4.0/Backer_0.4.0_x64-setup.exe) |
+
+The Mac build is ad hoc signed, not notarized: right-click the app, choose Open, then Open again. The Windows installer is unsigned: if SmartScreen warns, choose More info, then Run anyway. Older builds are on the [releases page](https://github.com/howardcrow3/Backer/releases).
+<!-- latest-build:end -->
+
 ## Layout
 | Path | What |
 |---|---|
