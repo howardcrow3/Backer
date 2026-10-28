@@ -2,6 +2,9 @@
 
 Backs up chosen folders to a NAS on a schedule. Never deletes NAS files without asking.
 
+## Download
+The latest Mac (Apple silicon) and Windows installers are on the [latest release](https://github.com/howardcrow3/Backer/releases/latest). Each release's notes link straight to that build's files, its commit and its CI run.
+
 ## Layout
 | Path | What |
 |---|---|

@@ -125,6 +125,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -135,5 +136,8 @@ jobs:
         run: |
           ls -l dist
           TAG="${{ inputs.release_tag || github.ref_name }}"
+          # Notes: download links for this build, how to open it, then the changelog since the previous release.
+          ./scripts/release-notes.sh "$TAG" "${{ github.repository }}" "${{ github.sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" dist > notes.md
           gh release create "$TAG" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
-            --title "Backer $TAG" --generate-notes
+            --title "Backer $TAG" --notes-file notes.md
