@@ -176,7 +176,7 @@ pub fn run_job_as(
                     scan_complete = false;
                     stats.warnings += 1;
                     fs.issues += 1;
-                    lg.ev("warning", &rel, Some(&walk_cause(&e)), None)?;
+                    lg.ev("warning", &entry.path().display().to_string(), Some(&walk_cause(&e)), None)?;
                     continue;
                 }
             };

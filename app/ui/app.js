@@ -131,12 +131,13 @@ function issueHtml(g, jobId) {
   const err = g.kind === 'error', n = g.count, dest = err && isDest(g.cause);
   const why = dest ? g.cause.replace(/^destination not ready:?\s*/i, '') : '';
   const unit = g.cause === 'Folder can’t be opened' ? 'folder' : 'file';
-  const title = dest ? 'Can’t reach your NAS' : err ? esc(g.cause) : `${fmtN(n)} ${unit}${n === 1 ? '' : 's'} · ${esc(g.cause || (g.kind === 'skipped' ? 'Skipped' : 'Problem'))}`;
+  const where = unit === 'folder' && n === 1 && g.sample[0];
+  const title = dest ? 'Can’t reach your NAS' : err ? esc(g.cause) : `${fmtN(n)} ${unit}${n === 1 ? '' : 's'} · ${where ? `<span class="mono">${esc(g.sample[0])}</span> · ` : ''}${esc(g.cause || (g.kind === 'skipped' ? 'Skipped' : 'Problem'))}`;
   const hint = dest ? `${why ? why.charAt(0).toUpperCase() + why.slice(1) + '. ' : ''}Check that the NAS is on and you are on the same network.` : (HINTS[g.cause] || '');
   const act = dest ? `<button data-test="${jobId}">Test NAS</button>` : '';
   const more = n > g.sample.length ? `<div class="lbl">and ${fmtN(n - g.sample.length)} more. <a href="#" data-chip="${g.kind}">Show them in the file log</a></div>` : '';
   const files = g.sample.filter(Boolean).length ? `<div class="samples">${g.sample.filter(Boolean).map(p => `<div class="mono">${esc(p)}</div>`).join('')}${more}</div>` : '';
-  return `<details class="issue"><summary><span class="ic ${err ? 'er' : 'wn'}">${err ? '!' : '▲'}</span><span class="grow"><b>${title}</b>${hint ? `<span class="lbl block">${esc(hint)}</span>` : ''}</span>${act}<span class="chev" aria-hidden="true">›</span></summary>${files}</details>`;
+  return `<details class="issue"${unit === 'folder' ? ' open' : ''}><summary><span class="ic ${err ? 'er' : 'wn'}">${err ? '!' : '▲'}</span><span class="grow"><b>${title}</b>${hint ? `<span class="lbl block">${esc(hint)}</span>` : ''}</span>${act}<span class="chev" aria-hidden="true">›</span></summary>${files}</details>`;
 }
 
 async function renderRun(id) {
