@@ -117,6 +117,9 @@ const KIND_LABEL = { new: 'New', updated: 'Updated', copied: 'Copied', skipped: 
 const KIND_CLASS = { new: 'new', updated: 'upd', copied: 'upd', skipped: 'warn', warning: 'warn', error: 'bad-p', deleted_flagged: 'info', run: 'info' };
 const CHIPS = [['all', 'All'], ['new', 'New'], ['updated', 'Updated'], ['copied', 'Copied'], ['skipped', 'Skipped'], ['warning', 'Warnings'], ['error', 'Errors'], ['deleted_flagged', 'Flagged'], ['run', 'Events']];
 const HINTS = {
+  'Folder can’t be opened': isWin
+    ? 'Windows won’t let Backer open this folder, so nothing inside it was backed up. It may be a protected system folder or belong to another user. To include it, right-click the folder, choose Properties, then Security, and allow your account to read it. Nothing on the NAS is flagged as deleted because of this, and the rest of the backup is not affected.'
+    : 'macOS won’t let Backer open this folder, so nothing inside it was backed up. Open System Settings, Privacy & Security, Full Disk Access and turn on Backer, or fix the folder’s permissions. Nothing on the NAS is flagged as deleted because of this, and the rest of the backup is not affected.',
   'Permission denied': 'Backer can’t read them, so they weren’t backed up. Check their permissions on this computer.',
   'Larger than the size limit': 'They weren’t backed up because they are bigger than this job’s file size limit.',
   'File vanished during backup': 'They were removed or moved while Backer was copying. The next run will pick up the new location.',
@@ -127,7 +130,8 @@ const tile = (label, val, sub, cls = '') => `<div class="card tile"><span class=
 function issueHtml(g, jobId) {
   const err = g.kind === 'error', n = g.count, dest = err && isDest(g.cause);
   const why = dest ? g.cause.replace(/^destination not ready:?\s*/i, '') : '';
-  const title = dest ? 'Can’t reach your NAS' : err ? esc(g.cause) : `${fmtN(n)} file${n === 1 ? '' : 's'} · ${esc(g.cause || (g.kind === 'skipped' ? 'Skipped' : 'Problem'))}`;
+  const unit = g.cause === 'Folder can’t be opened' ? 'folder' : 'file';
+  const title = dest ? 'Can’t reach your NAS' : err ? esc(g.cause) : `${fmtN(n)} ${unit}${n === 1 ? '' : 's'} · ${esc(g.cause || (g.kind === 'skipped' ? 'Skipped' : 'Problem'))}`;
   const hint = dest ? `${why ? why.charAt(0).toUpperCase() + why.slice(1) + '. ' : ''}Check that the NAS is on and you are on the same network.` : (HINTS[g.cause] || '');
   const act = dest ? `<button data-test="${jobId}">Test NAS</button>` : '';
   const more = n > g.sample.length ? `<div class="lbl">and ${fmtN(n - g.sample.length)} more. <a href="#" data-chip="${g.kind}">Show them in the file log</a></div>` : '';

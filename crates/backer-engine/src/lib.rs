@@ -40,7 +40,15 @@ fn io_cause(e: &std::io::Error) -> String {
     }
 }
 
+/// Cause shown when a whole folder could not be opened (so everything inside it was skipped).
+pub const FOLDER_LOCKED: &str = "Folder can’t be opened";
+
 fn walk_cause(e: &walkdir::Error) -> String {
+    let denied = e.io_error().is_some_and(|i| i.kind() == std::io::ErrorKind::PermissionDenied);
+    let is_dir = e.path().is_some_and(|p| std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(true));
+    if denied && is_dir {
+        return FOLDER_LOCKED.into();
+    }
     e.io_error().map(io_cause).unwrap_or_else(|| strip_os_code(&e.to_string()))
 }
 
@@ -564,7 +572,7 @@ mod tests {
         }
         if unsafe { libc_geteuid() } != 0 {
             let rep = e.store.run_report(r.id).unwrap();
-            assert_eq!((rep.issues[0].cause.as_str(), rep.issues[0].count), ("Permission denied", 2));
+            assert_eq!((rep.issues[0].cause.as_str(), rep.issues[0].count), (FOLDER_LOCKED, 2));
             assert_eq!(r.stats.warnings, 2);
         }
     }
