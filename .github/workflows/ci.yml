@@ -11,7 +11,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [macos-14, ubuntu-latest, windows-latest]   # macos-14 is Apple silicon
+        os: [macos-15, ubuntu-latest, windows-latest]   # macos-15 is Apple silicon
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +32,7 @@ jobs:
         shell: bash
   dmg:
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
