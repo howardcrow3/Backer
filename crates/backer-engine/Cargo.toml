@@ -9,6 +9,7 @@ backer-core.workspace = true
 backer-store.workspace = true
 backer-connector.workspace = true
 blake3.workspace = true
+serde.workspace = true
 walkdir.workspace = true
 unicode-normalization.workspace = true
 thiserror.workspace = true

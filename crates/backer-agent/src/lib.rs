@@ -8,7 +8,7 @@ pub mod platform;
 use jiff::{tz::TimeZone, Timestamp};
 use backer_connector::{Connector, MountedConnector};
 use backer_core::*;
-use backer_engine::{run_job_as, NoProgress};
+use backer_engine::{run_job_as, verify_job, NoProgress};
 use backer_mcp::Control;
 use backer_store::Store;
 use serde_json::{json, Value};
@@ -175,6 +175,17 @@ impl Agent {
         }))
     }
 
+    /// Checks that every file the job backs up is on the NAS with the right size. Reads only; changes nothing.
+    pub fn verify_job(&self, id: JobId) -> std::result::Result<Value, String> {
+        let store = self.store().map_err(es)?;
+        let job = self.require_job(&store, id)?;
+        if self.is_running(id) {
+            return Err("This job is backing up right now. Check it again when the backup has finished.".into());
+        }
+        let rep = verify_job(&store, &Agent::connector_for(&job), &job, &AtomicBool::new(false)).map_err(es)?;
+        serde_json::to_value(rep).map_err(|e| e.to_string())
+    }
+
     /// Forgets a job and its history. Never touches the NAS or the source folders.
     /// `expected_name` is required from assistants so a wrong id cannot delete the wrong job.
     pub fn delete_job(&self, id: JobId, expected_name: Option<&str>) -> std::result::Result<Value, String> {
@@ -296,6 +307,7 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "pause_job" => ctl.pause_job(need()?),
             "resume_job" => ctl.resume_job(need()?),
             "delete_job" => agent.delete_job(need()?, None),
+            "verify_job" => agent.verify_job(need()?),
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
@@ -469,6 +481,30 @@ mod tests {
         let job = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
         handle_ui(&t.agent, &json!({"method":"save_job","params":{"job": job}}));
         assert!(handle_ui(&t.agent, &json!({"method":"new_job_request"}))["result"]["request"].is_null());
+    }
+
+    #[test]
+    fn verify_finds_missing_files_and_run_with_skips_is_not_success() {
+        let t = setup();
+        fs::write(t.src.join("a"), b"1").unwrap();
+        fs::write(t.src.join("b"), b"22").unwrap();
+        t.agent.start_job(t.id).unwrap();
+        let v = |id| handle_ui(&t.agent, &json!({"method":"verify_job","params":{"job_id": id}}))["result"].clone();
+        let r = v(t.id);
+        assert_eq!((r["checked"].as_u64(), r["ok"].as_u64(), r["missing_total"].as_u64()), (Some(2), Some(2), Some(0)));
+        // A file that never reached the NAS is reported by name.
+        fs::write(t.src.join("c"), b"333").unwrap();
+        fs::remove_file(t.dst.join("mac/src/b")).unwrap();
+        let r = v(t.id);
+        assert_eq!((r["checked"].as_u64(), r["ok"].as_u64(), r["missing_total"].as_u64()), (Some(3), Some(1), Some(2)));
+        assert!(r["missing"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().ends_with('b')));
+        // Verify never copies anything.
+        assert!(!t.dst.join("mac/src/c").exists());
+        // Changed since the backup is called that, not damage.
+        fs::write(t.src.join("a"), b"1111").unwrap();
+        let r = v(t.id);
+        assert_eq!(r["changed_total"], 1);
+        assert_eq!(r["wrong_size_total"], 0);
     }
 
     #[test]

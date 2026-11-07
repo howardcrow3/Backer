@@ -1,6 +1,6 @@
 //! Run pipeline: scan each source folder, copy what changed, flag what vanished.
 //! The engine never deletes anything on the NAS.
-use backer_connector::TempCleaner;
+use backer_connector::{Connector, TempCleaner};
 use backer_core::*;
 use backer_store::{FileRec, Store};
 use std::collections::HashSet;
@@ -39,6 +39,9 @@ fn io_cause(e: &std::io::Error) -> String {
         _ => strip_os_code(&e.to_string()),
     }
 }
+
+/// Cause shown for links and shortcuts, which Backer does not follow.
+pub const LINK_SKIPPED: &str = "Shortcut or link, not copied";
 
 /// Cause shown when a whole folder could not be opened (so everything inside it was skipped).
 pub const FOLDER_LOCKED: &str = "Folder can’t be opened";
@@ -161,6 +164,12 @@ pub fn run_job_as(
                 }
             };
             if !entry.file_type().is_file() {
+                if !entry.file_type().is_dir() && entry.depth() > 0 {
+                    // Shortcuts, links and device files are not followed or copied. Say so instead of dropping them silently.
+                    stats.skipped += 1;
+                    fs.issues += 1;
+                    lg.ev("skipped", &entry.path().display().to_string(), Some(LINK_SKIPPED), None)?;
+                }
                 continue;
             }
             stats.scanned += 1;
@@ -276,7 +285,8 @@ pub fn run_job_as(
         (RunStatus::Cancelled, None)
     } else if let Some(f) = &failure {
         (RunStatus::Failed, Some(f.as_str()))
-    } else if stats.warnings > 0 {
+    } else if stats.warnings > 0 || stats.skipped > 0 {
+        // Anything that was not copied means the backup is not complete, so it is never reported as plain success.
         (RunStatus::Warnings, None)
     } else {
         (RunStatus::Ok, None)
@@ -289,6 +299,116 @@ pub fn run_job_as(
     store.finish_run(run, now + started.elapsed().as_secs() as i64, status, &stats, msg)?;
     progress.update(&stats);
     summary(store, job.id, run)
+}
+
+/// What a verification found. Lists are capped; the `*_total` fields are exact.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct VerifyReport {
+    /// Files on this computer that should be on the NAS.
+    pub checked: u64,
+    /// Present on the NAS with the same size.
+    pub ok: u64,
+    /// Not on the NAS at all.
+    pub missing: Vec<String>,
+    pub missing_total: u64,
+    /// Changed on this computer since they were backed up. The next backup will update them.
+    pub changed: Vec<String>,
+    pub changed_total: u64,
+    /// On the NAS, but with a size that matches neither the file here nor what Backer recorded.
+    pub wrong_size: Vec<String>,
+    pub wrong_size_total: u64,
+    /// Files or folders that could not be read here, so they could not be checked.
+    pub unreadable: Vec<String>,
+    pub unreadable_total: u64,
+    /// Not backed up by design.
+    pub links: u64,
+    pub too_large: u64,
+    pub excluded: u64,
+    /// Source folders that were not available.
+    pub folders_unavailable: Vec<String>,
+    pub cancelled: bool,
+    pub duration_ms: u64,
+}
+
+const VERIFY_LIST_CAP: usize = 200;
+
+fn push_capped(list: &mut Vec<String>, total: &mut u64, item: String) {
+    *total += 1;
+    if list.len() < VERIFY_LIST_CAP {
+        list.push(item);
+    }
+}
+
+/// Compares what is on this computer with what is on the NAS, without copying or changing anything.
+/// Every file the job would back up must exist on the NAS with the same size.
+pub fn verify_job(store: &Store, conn: &dyn Connector, job: &Job, cancel: &AtomicBool) -> Result<VerifyReport> {
+    job.validate()?;
+    conn.check_ready()?;
+    let started = Instant::now();
+    let mut rep = VerifyReport::default();
+    'folders: for pair in &job.folders {
+        let root = std::path::Path::new(&pair.source);
+        if !root.is_dir() {
+            rep.folders_unavailable.push(pair.source.clone());
+            continue;
+        }
+        let excluded_here = std::cell::Cell::new(0u64);
+        let walker = WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
+            let skip = e.depth() > 0 && excluded(job, &e.file_name().to_string_lossy());
+            if skip {
+                excluded_here.set(excluded_here.get() + 1);
+            }
+            !skip
+        });
+        for entry in walker {
+            if cancel.load(Ordering::Relaxed) {
+                rep.cancelled = true;
+                break 'folders;
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    let p = e.path().map(|p| p.display().to_string()).unwrap_or_default();
+                    push_capped(&mut rep.unreadable, &mut rep.unreadable_total, format!("{p} ({})", walk_cause(&e)));
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                if !entry.file_type().is_dir() && entry.depth() > 0 {
+                    rep.links += 1;
+                }
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                push_capped(&mut rep.unreadable, &mut rep.unreadable_total, entry.path().display().to_string());
+                continue;
+            };
+            if job.max_file_bytes.is_some_and(|max| meta.len() > max) {
+                rep.too_large += 1;
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            let dest_path = format!("{}/{}", pair.dest, nfc(&rel));
+            rep.checked += 1;
+            let shown = entry.path().display().to_string();
+            match conn.stat(&dest_path)? {
+                None => push_capped(&mut rep.missing, &mut rep.missing_total, shown),
+                Some(st) if st.size == meta.len() => rep.ok += 1,
+                Some(st) => {
+                    let backed_up_size = store.get_file(job.id, &dest_path)?.map(|r| r.size);
+                    if backed_up_size == Some(st.size) {
+                        push_capped(&mut rep.changed, &mut rep.changed_total, shown);
+                    } else {
+                        push_capped(&mut rep.wrong_size, &mut rep.wrong_size_total, shown);
+                    }
+                }
+            }
+        }
+        rep.excluded += excluded_here.get();
+    }
+    rep.duration_ms = started.elapsed().as_millis() as u64;
+    Ok(rep)
 }
 
 /// Per-file rows written for newly flagged deletions in one folder; the rest are only counted.
@@ -509,6 +629,18 @@ mod tests {
         assert!(rows[1].detail.as_deref().unwrap().contains("destination not ready"));
         let rep = e.store.run_report(r.id).unwrap();
         assert_eq!(rep.issues.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_reported_as_skipped_and_the_run_is_not_plain_success() {
+        let e = env();
+        fs::write(e.src.join("real"), b"x").unwrap();
+        std::os::unix::fs::symlink(e.src.join("real"), e.src.join("shortcut")).unwrap();
+        let r = go(&e, 1);
+        assert_eq!((r.stats.skipped, r.status), (1, RunStatus::Warnings));
+        let rep = e.store.run_report(r.id).unwrap();
+        assert_eq!(rep.issues[0].cause, LINK_SKIPPED);
     }
 
     #[test]

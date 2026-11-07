@@ -104,7 +104,7 @@ async function renderDetail(id) {
   const rr = shown.map(r => `<tr class="click" tabindex="0" data-openrun="${r.id}"><td><b>${fmtTime(r.started)}</b></td><td class="num dim">${fmtDur(runMs(r))}</td><td class="num">${fmtN(r.stats.copied)}</td><td class="num">${r.stats.bytes ? fmtBytes(r.stats.bytes) : '—'}</td><td>${resultPill(r)}</td><td class="chev" aria-hidden="true">›</td></tr>`).join('');
   const last = runs[0];
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / ${esc(j.job.name)}</div>
-    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
+    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button data-verify="${id}">Verify backup</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
     ${last ? `<div class="card strip"><div><div class="lbl">Last backup</div><div class="big">${fmtTime(last.started)}</div><div>${resultPill(last)}</div></div><div><div class="lbl">Last ${Math.min(15, runs.length)} runs · taller means more copied</div>${sparkline(runs)}</div></div>` : ''}
     <div class="row" style="margin-top:24px"><h2 style="flex:1;margin:0">Run history</h2><span class="chips"><button class="chip ${histFilter === 'all' ? 'on' : ''}" data-hist="all">All</button><button class="chip ${histFilter === 'attention' ? 'on' : ''}" data-hist="attention">Needs attention</button></span></div>
@@ -120,6 +120,7 @@ const HINTS = {
   'Folder can’t be opened': isWin
     ? 'Windows won’t let Backer open this folder, so nothing inside it was backed up. It may be a protected system folder or belong to another user. To include it, right-click the folder, choose Properties, then Security, and allow your account to read it. Nothing on the NAS is flagged as deleted because of this, and the rest of the backup is not affected.'
     : 'macOS won’t let Backer open this folder, so nothing inside it was backed up. Open System Settings, Privacy & Security, Full Disk Access and turn on Backer, or fix the folder’s permissions. Nothing on the NAS is flagged as deleted because of this, and the rest of the backup is not affected.',
+  'Shortcut or link, not copied': 'Backer does not follow shortcuts or links, so only the shortcut itself exists here and nothing was copied for it. Back up the folder it points to if you need those files.',
   'Permission denied': 'Backer can’t read them, so they weren’t backed up. Check their permissions on this computer.',
   'Larger than the size limit': 'They weren’t backed up because they are bigger than this job’s file size limit.',
   'File vanished during backup': 'They were removed or moved while Backer was copying. The next run will pick up the new location.',
@@ -157,7 +158,7 @@ async function renderRun(id) {
   const tiles = [
     tile('Copied', dash(fmtN(s.copied)), s.new_files || s.updated ? `${fmtN(s.new_files)} new · ${fmtN(s.updated)} updated` : ''),
     tile('Unchanged', dash(fmtN(s.unchanged))),
-    tile('Skipped', dash(fmtN(s.skipped)), s.skipped ? 'too large' : '', s.skipped ? 'wn' : ''),
+    tile('Skipped', dash(fmtN(s.skipped)), s.skipped ? 'not copied' : '', s.skipped ? 'wn' : ''),
     s.errors ? tile('Errors', fmtN(s.errors), 'stopped the run', 'er') : tile('Warnings', dash(fmtN(s.warnings)), s.warnings ? 'couldn’t be read' : '', s.warnings ? 'wn' : ''),
     tile('Excluded', dash(fmtN(s.excluded)), s.excluded ? 'left out by name' : ''),
     tile('Data sent', s.bytes ? fmtBytes(s.bytes) : '—', s.bytes && sec >= 1 ? `${fmtBytes(s.bytes / sec)}/s average` : '')
@@ -245,6 +246,25 @@ async function renderSettings() {
   const cb = $('#copycfg'); if (cb) cb.onclick = async () => { try { await navigator.clipboard.writeText(cfg); toast('Copied.'); } catch { toast('Select the text and copy it.', true); } };
 }
 
+// Result of "Verify backup": says plainly whether every file is on the NAS, and names any that are not.
+function verifyHtml(r, id) {
+  const list = (items, total) => `<div class="card mono" style="max-height:140px;overflow:auto">${items.map(esc).join('<br>')}${total > items.length ? `<br>and ${fmtN(total - items.length)} more` : ''}</div>`;
+  const problems = r.missing_total + r.wrong_size_total + r.unreadable_total + r.folders_unavailable.length;
+  const head = r.cancelled ? 'The check was stopped' : problems ? 'Some files are not on your NAS' : r.changed_total ? 'Everything is backed up, some files have changed since' : 'Every file is on your NAS';
+  const sec = (title, note, items, total) => total ? `<h2 style="font-size:14px;margin:14px 0 4px">${fmtN(total)} ${title}</h2><div class="sub">${note}</div>${list(items, total)}` : '';
+  const left = [r.links && `${fmtN(r.links)} shortcut${r.links === 1 ? '' : 's'}`, r.too_large && `${fmtN(r.too_large)} over the size limit`, r.excluded && `${fmtN(r.excluded)} left out by name`].filter(Boolean);
+  return `<h1 style="font-size:18px">${head}</h1>
+    <p>${fmtN(r.ok)} of ${fmtN(r.checked)} files checked are on the NAS with the right size.</p>
+    ${r.folders_unavailable.length ? `<div class="banner">Not available, so not checked: ${r.folders_unavailable.map(esc).join(', ')}</div>` : ''}
+    ${sec(`file${r.missing_total === 1 ? '' : 's'} missing from the NAS`, 'Run the backup to copy them. If they are still missing afterwards, open the run and look under warnings.', r.missing, r.missing_total)}
+    ${sec('with the wrong size on the NAS', 'The NAS copy does not match this computer or what Backer saved. Run the backup to replace it.', r.wrong_size, r.wrong_size_total)}
+    ${sec('could not be read here', 'Backer was not allowed to read these, so it could not check or back them up.', r.unreadable, r.unreadable_total)}
+    ${sec('changed since the last backup', 'They are on the NAS, but the NAS copy is older. The next backup will update them.', r.changed, r.changed_total)}
+    ${left.length ? `<div class="sub" style="margin-top:12px">Not part of the backup: ${left.join(', ')}.</div>` : ''}
+    <div class="sub" style="margin-top:8px">This compares names and sizes, not file contents. Checked in ${(r.duration_ms / 1000).toFixed(1)} s.</div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button id="vc">Close</button>${r.missing_total || r.wrong_size_total || r.changed_total ? '<button class="pri" id="vrun">Run backup now</button>' : ''}</div>`;
+}
+
 // ---- New job wizard (5 steps in one dialog)
 function wizard(suggested = '') {
   const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '' };
@@ -301,7 +321,7 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
@@ -327,6 +347,16 @@ document.addEventListener('click', async e => {
       catch (e) { d.close(); toast('Could not delete the job: ' + (e && e.message || e), true); }
     };
   }
+  else if (ds.verify) {
+    const id = +ds.verify, d = $('#dlg');
+    d.innerHTML = '<h1 style="font-size:18px">Checking your backup…</h1><p>Comparing every file on this computer with the NAS. This can take a few minutes for a large backup. Nothing is copied or changed.</p>';
+    d.showModal();
+    try { d.innerHTML = verifyHtml(await call('verify_job', { job_id: id }), id); }
+    catch (err) { d.innerHTML = `<h1 style="font-size:18px">Couldn’t check the backup</h1><p>${esc(err && err.message || err)}</p><div class="row" style="justify-content:flex-end"><button id="vc">Close</button></div>`; }
+    $('#vc', d).onclick = () => d.close();
+    const vr = $('#vrun', d); if (vr) vr.onclick = async () => { d.close(); await call('run_job', { job_id: id }); render(); };
+    return;
+  }
   else if (ds.test) {
     const b = t; const label = b.textContent; b.disabled = true; b.textContent = 'Testing…';
     try { const r = await call('test_connection', { job_id: +ds.test }); toast(r.ok ? 'The NAS is reachable.' : (r.error || 'The NAS could not be reached.'), !r.ok); }
@@ -347,5 +377,5 @@ document.addEventListener('input', e => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { logState.search = e.target.value.trim(); loadLog(true); }, 250);
 });
-document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v; detailId = null; runId = null; render(); }));
+document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; render(); }));
 render(); timer = setInterval(() => { if (!$('#dlg').open && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);

@@ -74,6 +74,7 @@ dependencies = [
  "backer-core",
  "backer-store",
  "blake3",
+ "serde",
  "tempfile",
  "thiserror",
  "unicode-normalization",
