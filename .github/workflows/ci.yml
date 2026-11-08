@@ -90,7 +90,8 @@ jobs:
         run: |
           cd app/src-tauri
           set +e
-          cargo tauri build --target aarch64-apple-darwin --bundles app,dmg 2>&1 | tee "$RUNNER_TEMP/tauri.log"
+          # The certificate is already in our keychain; if Tauri imported the secret itself it would not see the Developer ID certificate.
+          env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD cargo tauri build --target aarch64-apple-darwin --bundles app,dmg 2>&1 | tee "$RUNNER_TEMP/tauri.log"
           RC=${PIPESTATUS[0]}
           if [ "$RC" != "0" ]; then
             echo "::error::tauri build failed: $(tail -n 25 "$RUNNER_TEMP/tauri.log" | tr '\n' '|' | cut -c1-3000)"
