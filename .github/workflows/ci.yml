@@ -59,9 +59,12 @@ jobs:
           security set-keychain-settings -lut 21600 "$KC"
           security unlock-keychain -p "$KP" "$KC"
           security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          # The .p12 may only carry an older certificate for the same key. The Developer ID certificate is public,
+          # so it is kept in the repo and imported here; it pairs with the key by its public key.
+          security import .github/signing/developer-id.cer -k "$KC" -A
           security set-key-partition-list -S apple-tool:,apple: -k "$KP" "$KC"
           security list-keychains -d user -s "$KC" login.keychain-db
-          ID=$(security find-identity -v -p codesigning "$KC" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          ID=$(security find-identity -p codesigning "$KC" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
           if [ -z "$ID" ]; then
             ALL=$(security find-identity -v "$KC" | sed 's/"/'"'"'/g' | tr '\n' ';')
             ALLP=$(security find-identity "$KC" | sed 's/"/'"'"'/g' | tr '\n' ';')
