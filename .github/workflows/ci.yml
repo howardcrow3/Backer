@@ -62,6 +62,12 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KP" "$KC"
           security list-keychains -d user -s "$KC" login.keychain-db
           ID=$(security find-identity -v -p codesigning "$KC" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          if [ -z "$ID" ]; then
+            ALL=$(security find-identity -v "$KC" | sed 's/"/'"'"'/g' | tr '\n' ';')
+            ALLP=$(security find-identity "$KC" | sed 's/"/'"'"'/g' | tr '\n' ';')
+            echo "::error::No usable Developer ID Application identity in the imported .p12. Valid identities: $ALL | All (incl. untrusted/unpaired): $ALLP"
+            exit 1
+          fi
           echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
       - name: Ad hoc signing (no Apple secrets)
         if: env.SIGNED != '1'
