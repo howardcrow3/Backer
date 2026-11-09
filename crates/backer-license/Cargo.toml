@@ -1,0 +1,18 @@
+[package]
+name = "backer-license"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Signing (key generation and issuing) is only compiled for the seller's own tool, never into the app.
+issue = []
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+data-encoding = "2"
+getrandom.workspace = true
+
+[[bin]]
+name = "backer-keygen"
+required-features = ["issue"]

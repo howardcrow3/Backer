@@ -10,3 +10,4 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 serde_json = "1"
+backer-license = { path = "../../crates/backer-license" }

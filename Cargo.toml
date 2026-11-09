@@ -28,5 +28,6 @@ backer-store = { path = "crates/backer-store" }
 backer-connector = { path = "crates/backer-connector" }
 backer-engine = { path = "crates/backer-engine" }
 backer-sched = { path = "crates/backer-sched" }
+backer-license = { path = "crates/backer-license" }
 backer-mcp = { path = "crates/backer-mcp" }
 backer-removal = { path = "crates/backer-removal" }

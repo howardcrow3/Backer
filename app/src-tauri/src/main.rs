@@ -66,6 +66,22 @@ async fn save_text_file(app: tauri::AppHandle, name: String, text: String) -> Re
     Ok(true)
 }
 
+/// Opens the store's checkout page in the default browser. The address is built into the app, never taken from the page.
+#[tauri::command]
+fn open_purchase_page() -> Result<(), String> {
+    let url = backer_license::PURCHASE_URL.trim();
+    if !url.starts_with("https://") {
+        return Err("The store address is not set up in this build.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    r.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn mcp_config() -> Result<String, String> {
     let exe = agent_exe().ok_or("cannot locate the agent")?;
@@ -186,7 +202,7 @@ fn run_all() {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page])
         .setup(|app| {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;

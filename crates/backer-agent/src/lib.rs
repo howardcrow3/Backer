@@ -2,6 +2,7 @@
 pub mod approvals;
 pub mod bridge;
 pub mod ipc;
+pub mod licensing;
 pub mod server;
 pub mod platform;
 
@@ -45,6 +46,7 @@ pub struct Agent {
     quit: AtomicBool,
     /// A job set-up an assistant asked for (suggested name). The user completes or dismisses it in the app.
     new_job_request: Mutex<Option<String>>,
+    pub licensing: licensing::Licensing,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -53,15 +55,17 @@ pub fn now_ts() -> Timestamp {
 
 impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
+        let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
     #[doc(hidden)]
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
+        let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
         a.store()?;
         Ok(a)
     }
@@ -81,6 +85,9 @@ impl Agent {
 
     pub fn start_job_as(self: &Arc<Self>, id: JobId, trigger: Trigger) -> Result<Start> {
         let job = self.store()?.get_job(id)?.ok_or_else(|| Error::Invalid(format!("no job {id}")))?;
+        if !self.licensing.may_back_up(now_ts().as_second()) {
+            return Err(Error::Invalid(licensing::TRIAL_ENDED.into()));
+        }
         let cancel = {
             let mut st = self.state.lock().unwrap();
             if st.active.contains_key(&id) || st.queue.iter().any(|(j, _)| *j == id) {
@@ -153,6 +160,9 @@ impl Agent {
 
     /// Called every 30 s and after wake. Starts every due job.
     pub fn tick(self: &Arc<Self>, now: Timestamp) -> Result<Vec<JobId>> {
+        if !self.licensing.may_back_up(now.as_second()) {
+            return Ok(vec![]);
+        }
         let store = self.store()?;
         let mut started = vec![];
         for job in store.list_jobs()? {
@@ -307,6 +317,8 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "pause_job" => ctl.pause_job(need()?),
             "resume_job" => ctl.resume_job(need()?),
             "delete_job" => agent.delete_job(need()?, None),
+            "license_status" => Ok(agent.licensing.json(now_ts().as_second())),
+            "set_license_key" => agent.licensing.set_key(p.get("key").and_then(Value::as_str).unwrap_or(""), now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "verify_job" => agent.verify_job(need()?),
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
@@ -505,6 +517,38 @@ mod tests {
         let r = v(t.id);
         assert_eq!(r["changed_total"], 1);
         assert_eq!(r["wrong_size_total"], 0);
+    }
+
+    #[test]
+    fn after_the_trial_backups_stop_but_reading_and_verify_keep_working() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("nas"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a"), b"1").unwrap();
+        // A trial that started 30 days ago.
+        let started = now_ts().as_second() - 30 * 86_400;
+        fs::write(t.path().join("license.json"), json!({"first_run": started, "last_seen": started, "key": null}).to_string()).unwrap();
+        let agent = Agent::new_sync(t.path().join("db.sqlite"), TimeZone::get("America/Los_Angeles").unwrap()).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
+        assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
+        ui("init_destination", json!({"path": dst}));
+        let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+        let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
+        // Starting is refused with a message people can act on, from the app and from an assistant alike.
+        let msg = ui("run_job", json!({"job_id": id}))["error"].as_str().unwrap().to_string();
+        assert!(msg.contains("trial has ended") && msg.contains("license key"), "{msg}");
+        assert!(AgentControl(agent.clone()).run_job(id).unwrap_err().contains("trial has ended"));
+        assert!(!dst.join("mac/src/a").exists());
+        // The schedule starts nothing.
+        assert!(agent.tick(now_ts() + jiff::SignedDuration::from_hours(48)).unwrap().is_empty());
+        // Reading and checking still work.
+        assert!(ui("list_jobs", json!({}))["result"].is_array());
+        assert!(ui("verify_job", json!({"job_id": id}))["result"]["missing_total"].as_u64() == Some(1));
+        // An invalid key is refused and the trial state is unchanged.
+        assert!(ui("set_license_key", json!({"key": "BACKER-AAAAA-BBBBB"}))["error"].is_string());
+        assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
     }
 
     #[test]

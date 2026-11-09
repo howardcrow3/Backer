@@ -50,12 +50,33 @@ async function showRequest() {
   $('#req-no').onclick = async () => { await call('dismiss_new_job_request'); b.remove(); };
 }
 
+// Trial and license banner: shown when the trial is nearly over or has ended.
+async function showLicense() {
+  let l; try { l = await call('license_status'); } catch { return; }
+  let b = $('#lic');
+  const show = l.state === 'expired' || (l.state === 'trial' && l.days_left <= 5);
+  if (!show) { if (b) b.remove(); return; }
+  if (!b) { b = document.createElement('div'); b.id = 'lic'; b.className = 'banner'; document.body.prepend(b); }
+  b.innerHTML = `<span>${l.state === 'expired' ? 'Your free trial has ended, so backups are paused. Your backed-up files and history are untouched.' : `Your free trial ends in ${l.days_left} day${l.days_left === 1 ? '' : 's'}.`}</span> <button class="pri" data-buy>Buy Backer</button> <button data-go="settings">Enter a key</button>`;
+}
+
+function licenseHtml(l) {
+  const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer.`
+    : l.state === 'trial' ? `<span class="pill warn">Free trial</span> ${l.days_left} day${l.days_left === 1 ? '' : 's'} left. Everything works during the trial.`
+    : `<span class="pill bad-p">Trial ended</span> Backups are paused until you enter a license key. Viewing your history, Verify and restoring still work.`;
+  return `<h2>License</h2><div class="card">${status}</div>
+    ${l.state === 'licensed' ? '' : `<div class="sub">Paste the key from your purchase email.</div>
+    <textarea id="lickey" rows="3" class="mono" style="width:100%" placeholder="BACKER-XXXXX-XXXXX-…"></textarea>
+    <div class="row"><button class="pri" data-activate>Activate</button><button data-buy>Buy Backer</button></div>`}`;
+}
+
 async function render() {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
   try {
     $('#agent').textContent = 'Agent running';
     const jobs = await call('list_jobs');
     await showRequest();
+    await showLicense();
     const pending = jobs.reduce((n, j) => n + j.pending_deleted, 0);
     const b = $('#badge'); b.hidden = !pending; b.textContent = pending;
     if (view === 'jobs') return runId ? await renderRun(runId) : detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
@@ -235,7 +256,8 @@ async function renderDeleted() {
 async function renderSettings() {
   const clients = await call('list_mcp_clients');
   const cfg = await T.core.invoke('mcp_config').catch(() => '');
-  $('#main').innerHTML = `<h1>Settings</h1><h2>AI assistants (MCP)</h2>
+  const lic = await call('license_status');
+  $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>AI assistants (MCP)</h2>
     <div class="sub">Approved assistants can see jobs, run them, pause them, change schedules and delete a whole job (they must give its exact name), and ask you to set up a new job (you choose the folders, NAS and times). They cannot delete files from the NAS, or choose or change folders or destinations.</div>
     ${clients.length ? `<table><thead><tr><th>Program</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody>${clients.map(c => `<tr><td>${esc(c.client.name)}<div class="mono" style="color:var(--ink-muted)">${esc(c.identity.slice(0, 60))}</div></td><td>${c.client.approved ? '<span class="pill ok">Approved</span>' : '<span class="pill warn">Waiting for you</span>'}</td><td>${fmtTime(c.client.last_used)}</td>
       <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}
@@ -321,7 +343,7 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
@@ -362,6 +384,12 @@ document.addEventListener('click', async e => {
     try { const r = await call('test_connection', { job_id: +ds.test }); toast(r.ok ? 'The NAS is reachable.' : (r.error || 'The NAS could not be reached.'), !r.ok); }
     catch (e) { toast('Could not test the NAS: ' + (e && e.message || e), true); }
     finally { b.disabled = false; b.textContent = label; }
+  }
+  else if (ds.buy !== undefined) { try { await T.core.invoke('open_purchase_page'); } catch (e) { toast('Could not open the store page: ' + (e && e.message || e), true); } return; }
+  else if (ds.activate !== undefined) {
+    const key = ($('#lickey') || {}).value || '';
+    try { await call('set_license_key', { key }); toast('License activated. Thank you!'); }
+    catch (e) { toast(e && e.message || String(e), true); }
   }
   else if (ds.approve) { await call('approve_mcp_client', { identity: ds.approve }); }
   else if (ds.revoke) { await call('revoke_mcp_client', { identity: ds.revoke }); }
