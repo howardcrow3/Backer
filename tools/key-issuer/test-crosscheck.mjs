@@ -1,5 +1,5 @@
-// Cross-check: a key made by the Worker's code must verify in the Rust app. Prints "<pubkey-hex> <key>".
-import { issueKey } from "./worker.js";
+// Cross-check: a key made by the issuer's code must verify in the Rust app. Prints "<pubkey-hex> <key>".
+import { issueKey } from "./issuer.mjs";
 import { generateKeyPairSync } from "node:crypto";
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const seed = privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32);

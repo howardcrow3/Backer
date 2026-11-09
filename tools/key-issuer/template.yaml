@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Backer license key issuer. The store calls the function URL on each purchase and gets a signed key back.
+
+Parameters:
+  SecretPrefix:
+    Type: String
+    Default: /backer/license
+    Description: SSM Parameter Store path holding signing-key, issuer-user and issuer-password (SecureString).
+
+Resources:
+  KeyIssuer:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: lambda.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 10
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          SECRET_PREFIX: !Ref SecretPrefix
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameters
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretPrefix}/*
+      # The store sends a username and password with each request, which the function checks itself.
+      FunctionUrlConfig:
+        AuthType: NONE
+
+Outputs:
+  IssuerUrl:
+    Description: Address to give the store (FastSpring Remote Server Request URL).
+    Value: !GetAtt KeyIssuerUrl.FunctionUrl
