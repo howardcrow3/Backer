@@ -204,9 +204,9 @@ mod tests {
     }
 
     #[test]
-    fn a_build_without_the_real_public_key_says_so() {
-        assert_eq!(embedded_public_key(), None);
-        assert_eq!(verify("BACKER-AAAAA"), Err(LicenseError::NotConfigured));
+    fn the_embedded_public_key_is_a_real_key_and_junk_is_rejected() {
+        assert!(embedded_public_key().is_some(), "public_key.hex must hold the real 64-character key");
+        assert!(verify("BACKER-AAAAA").is_err());
     }
 
     #[test]

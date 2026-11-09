@@ -135,11 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn this_build_without_a_public_key_rejects_any_key_with_a_clear_message() {
+    fn a_junk_key_is_rejected_with_a_clear_message_and_not_saved() {
         let d = tempfile::tempdir().unwrap();
         let l = at(d.path(), 1_800_000_000);
         let e = l.set_key("BACKER-AAAAA", 1_800_000_000).unwrap_err();
-        assert!(e.contains("can’t check license keys"), "{e}");
+        assert!(e.contains("Backer license key"), "{e}");
+        assert!(matches!(l.status(1_800_000_000), Status::Trial { .. }));
     }
 
     #[test]
