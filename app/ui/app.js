@@ -53,11 +53,23 @@ async function showRequest() {
 // Trial and license banner: shown when the trial is nearly over or has ended.
 async function showLicense() {
   let l; try { l = await call('license_status'); } catch { return; }
+  trialIndicator(l);
   let b = $('#lic');
   const show = l.state === 'expired' || (l.state === 'trial' && l.days_left <= 5);
   if (!show) { if (b) b.remove(); return; }
   if (!b) { b = document.createElement('div'); b.id = 'lic'; b.className = 'banner'; document.body.prepend(b); }
   b.innerHTML = `<span>${l.state === 'expired' ? 'Your free trial has ended, so backups are paused. Your backed-up files and history are untouched.' : `Your free trial ends in ${l.days_left} day${l.days_left === 1 ? '' : 's'}.`}</span> <button class="pri" data-buy>Buy Backer</button> <button data-go="settings">Enter a key</button>`;
+}
+
+// Always-visible trial indicator at the bottom of the left navigation. Hidden once a key is entered.
+function trialIndicator(l) {
+  const t = $('#trial'); if (!t) return;
+  if (l.state === 'licensed') { t.hidden = true; return; }
+  const ended = l.state === 'expired';
+  const text = ended ? 'Trial ended' : `${l.days_left} day${l.days_left === 1 ? '' : 's'} left in trial`;
+  t.className = 'trial' + (ended ? ' ended' : l.days_left <= 5 ? ' soon' : '');
+  t.innerHTML = `<div class="t-days">${text}</div><button class="pri" data-buy>Buy now</button>`;
+  t.hidden = false;
 }
 
 function licenseHtml(l) {
