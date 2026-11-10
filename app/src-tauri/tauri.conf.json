@@ -36,6 +36,15 @@
     },
     "externalBin": [
       "binaries/backer-agent"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://updates.example.com/backer/latest.json"
+      ]
+    }
   }
 }

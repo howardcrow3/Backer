@@ -72,6 +72,23 @@ function trialIndicator(l) {
   t.hidden = false;
 }
 
+// App updates. Checked at most every 6 hours while the window is open; the user decides when to install.
+let lastUpdateCheck = 0, pendingUpdate = null;
+async function checkForUpdate(force = false) {
+  if (!force && Date.now() - lastUpdateCheck < 6 * 3600 * 1000) return pendingUpdate;
+  lastUpdateCheck = Date.now();
+  try { pendingUpdate = await T.core.invoke('check_update'); } catch (e) { if (force) throw e; }
+  return pendingUpdate;
+}
+async function showUpdate(force = false) {
+  const u = await checkForUpdate(force);
+  let b = $('#upd');
+  if (!u) { if (b) b.remove(); return; }
+  if (!b) { b = document.createElement('div'); b.id = 'upd'; b.className = 'banner'; document.body.prepend(b); }
+  b.innerHTML = `<span>Backer ${esc(u.version)} is available (you have ${esc(u.current)}). Installing restarts Backer; a backup in progress stops and resumes at its next scheduled time.</span> <button class="pri" data-install>Install and restart</button>`;
+}
+async function appVersion() { try { return await T.app.getVersion(); } catch { return ''; } }
+
 function licenseHtml(l) {
   const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer.`
     : l.state === 'trial' ? `<span class="pill warn">Free trial</span> ${l.days_left} day${l.days_left === 1 ? '' : 's'} left. Everything works during the trial.`
@@ -89,6 +106,7 @@ async function render() {
     const jobs = await call('list_jobs');
     await showRequest();
     await showLicense();
+    showUpdate().catch(() => {});
     const pending = jobs.reduce((n, j) => n + j.pending_deleted, 0);
     const b = $('#badge'); b.hidden = !pending; b.textContent = pending;
     if (view === 'jobs') return runId ? await renderRun(runId) : detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
@@ -269,7 +287,7 @@ async function renderSettings() {
   const clients = await call('list_mcp_clients');
   const cfg = await T.core.invoke('mcp_config').catch(() => '');
   const lic = await call('license_status');
-  $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>AI assistants (MCP)</h2>
+  $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>Updates</h2><div class="card">Backer ${esc(await appVersion())}</div><div class="row"><button data-checkupdate>Check for updates</button></div><h2>AI assistants (MCP)</h2>
     <div class="sub">Approved assistants can see jobs, run them, pause them, change schedules and delete a whole job (they must give its exact name), and ask you to set up a new job (you choose the folders, NAS and times). They cannot delete files from the NAS, or choose or change folders or destinations.</div>
     ${clients.length ? `<table><thead><tr><th>Program</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody>${clients.map(c => `<tr><td>${esc(c.client.name)}<div class="mono" style="color:var(--ink-muted)">${esc(c.identity.slice(0, 60))}</div></td><td>${c.client.approved ? '<span class="pill ok">Approved</span>' : '<span class="pill warn">Waiting for you</span>'}</td><td>${fmtTime(c.client.last_used)}</td>
       <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}
@@ -355,7 +373,7 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
@@ -397,7 +415,16 @@ document.addEventListener('click', async e => {
     catch (e) { toast('Could not test the NAS: ' + (e && e.message || e), true); }
     finally { b.disabled = false; b.textContent = label; }
   }
-  else if (ds.buy !== undefined) { try { await T.core.invoke('open_purchase_page'); } catch (e) { toast('Could not open the store page: ' + (e && e.message || e), true); } return; }
+  else if (ds.install !== undefined) {
+    t.disabled = true; t.textContent = 'Installing…';
+    try { await T.core.invoke('install_update'); } catch (e) { t.disabled = false; t.textContent = 'Install and restart'; toast(String((e && e.message) || e), true); }
+    return;
+  } else if (ds.checkupdate !== undefined) {
+    t.disabled = true; t.textContent = 'Checking…';
+    try { const u = await checkForUpdate(true); await showUpdate(); toast(u ? `Backer ${u.version} is available.` : 'Backer is up to date.'); }
+    catch (e) { toast(String((e && e.message) || e), true); }
+    t.disabled = false; t.textContent = 'Check for updates'; return;
+  } else if (ds.buy !== undefined) { try { await T.core.invoke('open_purchase_page'); } catch (e) { toast('Could not open the store page: ' + (e && e.message || e), true); } return; }
   else if (ds.activate !== undefined) {
     const key = ($('#lickey') || {}).value || '';
     try { await call('set_license_key', { key }); toast('License activated. Thank you!'); }

@@ -75,6 +75,21 @@ jobs:
       - name: Ad hoc signing (no Apple secrets)
         if: env.SIGNED != '1'
         run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+      - name: Set the app version from the release tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+        run: |
+          if [ -n "$TAG" ]; then
+            V="${TAG#v}"
+            python3 - "$V" <<'PY'
+          import json, sys
+          p = "app/src-tauri/tauri.conf.json"
+          c = json.load(open(p)); c["version"] = sys.argv[1]
+          json.dump(c, open(p, "w"), indent=2)
+          PY
+            echo "Building version $V"
+          fi
       - run: cargo build --release -p backer-agent
       - name: Sign and bundle the agent
         run: |
@@ -87,11 +102,16 @@ jobs:
       - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
       - run: cd app/src-tauri && cargo test tray_dot
       - name: Build the app (and notarize when signed)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cd app/src-tauri
           set +e
+          # Update packages are signed with the updater key; without it, build only the installer.
+          CFG=(); [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && CFG=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
           # The certificate is already in our keychain; if Tauri imported the secret itself it would not see the Developer ID certificate.
-          env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD cargo tauri build --target aarch64-apple-darwin --bundles app,dmg 2>&1 | tee "$RUNNER_TEMP/tauri.log"
+          env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD cargo tauri build "${CFG[@]}" --target aarch64-apple-darwin --bundles app,dmg 2>&1 | tee "$RUNNER_TEMP/tauri.log"
           RC=${PIPESTATUS[0]}
           if [ "$RC" != "0" ]; then
             echo "::error::tauri build failed: $(tail -n 25 "$RUNNER_TEMP/tauri.log" | tr '\n' '|' | cut -c1-3000)"
@@ -107,10 +127,12 @@ jobs:
         run: |
           mkdir out
           cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/ || cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/
+          # Update package and its signature (only present when the updater key is set).
+          cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz* out/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
           name: Backer-macOS-arm64-dmg
-          path: out/*.dmg
+          path: out/*
 
   windows:
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
@@ -120,6 +142,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - name: Set the app version from the release tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+        run: |
+          if [ -n "$TAG" ]; then
+            V="${TAG#v}"
+            python3 - "$V" <<'PY'
+          import json, sys
+          p = "app/src-tauri/tauri.conf.json"
+          c = json.load(open(p)); c["version"] = sys.argv[1]
+          json.dump(c, open(p, "w"), indent=2)
+          PY
+            echo "Building version $V"
+          fi
       - run: cargo build --release -p backer-agent
       - name: Bundle the agent next to the app
         shell: bash
@@ -129,12 +166,21 @@ jobs:
       - run: cargo install tauri-cli --version "^2" --locked
       - run: cargo tauri icon ../icon-source.png
         working-directory: app/src-tauri
-      - run: cargo tauri build --bundles nsis
+      - name: Build the installer
+        shell: bash
         working-directory: app/src-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          CFG=(); [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && CFG=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          cargo tauri build "${CFG[@]}" --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
           name: Backer-Windows-x64-installer
-          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/nsis/*.exe.sig
 
   release:
     # Runs for a pushed v* tag, or a manual run with release_tag set: publishes the installers as a GitHub release.
@@ -143,6 +189,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write   # lets the release job sign in to AWS without stored keys
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -170,3 +217,41 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "Update download links for $TAG"
           git push origin main
+      - name: Publish the update feed (only when the AWS settings exist)
+        env:
+          BUCKET: ${{ vars.UPDATE_S3_BUCKET }}
+          BASE_URL: ${{ vars.UPDATE_BASE_URL }}
+          ROLE: ${{ secrets.AWS_UPDATE_ROLE_ARN }}
+        run: |
+          if [ -z "$BUCKET" ] || [ -z "$BASE_URL" ] || [ -z "$ROLE" ]; then echo "Update feed not configured; skipping."; echo "FEED=0" >> "$GITHUB_ENV"; exit 0; fi
+          echo "FEED=1" >> "$GITHUB_ENV"
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.FEED == '1'
+        with:
+          role-to-assume: ${{ secrets.AWS_UPDATE_ROLE_ARN }}
+          aws-region: ${{ vars.UPDATE_AWS_REGION || 'us-west-2' }}
+      - name: Upload packages and latest.json
+        if: env.FEED == '1'
+        env:
+          BUCKET: ${{ vars.UPDATE_S3_BUCKET }}
+          BASE_URL: ${{ vars.UPDATE_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag || github.ref_name }}"; V="${TAG#v}"
+          MAC=$(ls dist/*.app.tar.gz | head -1); WIN=$(ls dist/*-setup.exe | head -1)
+          [ -f "$MAC.sig" ] && [ -f "$WIN.sig" ] || { echo "::error::Update signatures missing: set TAURI_SIGNING_PRIVATE_KEY"; exit 1; }
+          BASE="${BASE_URL%/}/$V"
+          NOTES=$(gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body 2>/dev/null | head -c 4000 || true)
+          python3 - "$V" "$BASE" "$MAC" "$WIN" "$NOTES" <<'PY'
+          import json, sys, os, datetime
+          v, base, mac, win, notes = sys.argv[1:6]
+          sig = lambda f: open(f + ".sig").read().strip()
+          m = {"version": v, "notes": notes, "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "platforms": {"darwin-aarch64": {"signature": sig(mac), "url": f"{base}/{os.path.basename(mac)}"},
+                             "windows-x86_64": {"signature": sig(win), "url": f"{base}/{os.path.basename(win)}"}}}
+          json.dump(m, open("latest.json", "w"), indent=2)
+          PY
+          # Packages first (never overwritten), then the feed that points at them.
+          aws s3 cp "$MAC" "s3://$BUCKET/backer/$V/" --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp "$WIN" "s3://$BUCKET/backer/$V/" --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp latest.json "s3://$BUCKET/backer/latest.json" --cache-control "no-cache" --content-type application/json

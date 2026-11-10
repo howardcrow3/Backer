@@ -10,6 +10,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 
 trait Rw: Read + Write {}
 impl<T: Read + Write> Rw for T {}
@@ -199,10 +200,51 @@ fn run_all() {
     }
 }
 
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    notes: Option<String>,
+}
+
+/// Updates are switched on once tauri.conf.json carries the real updater public key and address.
+fn updater_ready(app: &AppHandle) -> bool {
+    app.config().plugins.0.get("updater").and_then(|c| c["pubkey"].as_str()).map(|k| !k.is_empty() && !k.contains("REPLACE")).unwrap_or(false)
+}
+
+/// Ask the update server whether a newer version exists. `None` means up to date (or updates are not set up yet).
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    if !updater_ready(&app) {
+        return Ok(None);
+    }
+    let up = app.updater().map_err(|e| e.to_string())?;
+    let found = up.check().await.map_err(|e| format!("Could not check for updates: {e}"))?;
+    Ok(found.map(|u| UpdateInfo { version: u.version.clone(), current: u.current_version.clone(), notes: u.body.clone() }))
+}
+
+/// Download the update, stop the background agent (so its file can be replaced), install, and restart.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let up = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = up.check().await.map_err(|e| format!("Could not check for updates: {e}"))? else {
+        return Ok(());
+    };
+    // The download is checked against the signature in the update manifest before anything is replaced.
+    let bytes = update.download(|_, _| {}, || {}).await.map_err(|e| format!("The update could not be downloaded: {e}"))?;
+    stop_service();
+    if let Err(e) = update.install(bytes) {
+        ensure_agent(); // keep backups running if the install failed
+        return Err(format!("The update could not be installed: {e}"));
+    }
+    app.restart();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update])
         .setup(|app| {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;

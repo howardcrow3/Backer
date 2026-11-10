@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Backer update hosting. A private S3 bucket behind CloudFront, plus a role GitHub Actions uses to publish releases.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: howardcrow3/Backer
+    Description: owner/repo allowed to publish (only its v* tags and manual runs on main).
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if this AWS account already has the token.actions.githubusercontent.com OIDC provider.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Only when the provider already exists (CreateGitHubOidcProvider=false).
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  UpdateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Comment: Backer updates
+        Origins:
+          - Id: updates
+            DomainName: !GetAtt UpdateBucket.RegionalDomainName
+            S3OriginConfig: { OriginAccessIdentity: "" }
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+        DefaultCacheBehavior:
+          TargetOriginId: updates
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD]
+          # CachingOptimized managed policy; latest.json is uploaded with no-cache, which CloudFront honours.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UpdateBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${UpdateBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  GitHubProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  PublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [MakeProvider, !Ref GitHubProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Release tags, and manual runs started from main.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubRepo}:ref:refs/tags/v*"
+                  - !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: publish-updates
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject]
+                Resource: !Sub "${UpdateBucket.Arn}/backer/*"
+
+Outputs:
+  BucketName:
+    Description: GitHub repository variable UPDATE_S3_BUCKET
+    Value: !Ref UpdateBucket
+  BaseUrl:
+    Description: GitHub repository variable UPDATE_BASE_URL (add /backer). The app's update address is this plus /backer/latest.json
+    Value: !Sub "https://${Distribution.DomainName}/backer"
+  RoleArn:
+    Description: GitHub secret AWS_UPDATE_ROLE_ARN
+    Value: !GetAtt PublishRole.Arn
