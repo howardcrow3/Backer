@@ -254,4 +254,9 @@ jobs:
           # Packages first (never overwritten), then the feed that points at them.
           aws s3 cp "$MAC" "s3://$BUCKET/backer/$V/" --cache-control "public,max-age=31536000,immutable"
           aws s3 cp "$WIN" "s3://$BUCKET/backer/$V/" --cache-control "public,max-age=31536000,immutable"
+          # Installers for the download page: a versioned copy, and fixed names that always point at the newest release.
+          DMG=$(ls dist/*.dmg | head -1)
+          aws s3 cp "$DMG" "s3://$BUCKET/backer/$V/" --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp "$DMG" "s3://$BUCKET/backer/download/Backer-macOS-arm64.dmg" --cache-control "no-cache"
+          aws s3 cp "$WIN" "s3://$BUCKET/backer/download/Backer-Windows-x64-setup.exe" --cache-control "no-cache"
           aws s3 cp latest.json "s3://$BUCKET/backer/latest.json" --cache-control "no-cache" --content-type application/json

@@ -48,4 +48,5 @@ Withdraw a bad release by re-uploading the previous `latest.json` (S3 versioning
   updater and the public key, so the first release carrying this feature has to be installed by hand.
 - Versions must increase (0.5.0 after 0.4.0). The app never downgrades.
 - The Windows installer is not code-signed yet, so Windows may show a SmartScreen warning for the installer and for updates.
+- Download page links that never change: `<BaseUrl>/download/Backer-macOS-arm64.dmg` and `<BaseUrl>/download/Backer-Windows-x64-setup.exe` (replaced on every release).
 - The macOS update package is the same signed and notarized app as the DMG.
