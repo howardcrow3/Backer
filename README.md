@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/howardcrow3/Backer/actions/workflows/ci.yml/badge.svg)](https://github.com/howardcrow3/Backer/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/howardcrow3/Backer?label=release)](https://github.com/howardcrow3/Backer/releases/latest)
-![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-0F5257)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-1C1C1C)
 
 Backer is a desktop app for macOS and Windows. You pick the folders, pick a folder on your NAS, and choose when it should run. A small background service does the rest, even when the window is closed. Your backups are ordinary files in the same folder layout, so you can browse and restore them with Finder or File Explorer.
 
@@ -104,7 +104,7 @@ Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on 
 ## Platform notes
 
 - **Windows.** The service listens on loopback TCP with a random token kept in `%LOCALAPPDATA%\Backer`. Windows can't tell which program is on a local port, so MCP approval there is one shared "unverified" identity.
-- **Design.** The UI follows the Backer design language: light and dark colour tokens, Instrument Sans and JetBrains Mono, and the "Refresh" icon (two looping arrows on a paper tile with an amber status dot). Tokens are at the top of `app/ui/style.css`, and fonts are bundled in `app/ui/fonts` (SIL OFL). Status colours are blue (success), amber (warnings) and vermilion (failed), never green and red.
+- **Design.** The UI follows the Turtlebox design system, the same one turtlebox.studio uses: warm neutrals (ivory, warm white, charcoal), one gold accent, Inter only (bundled in `app/ui/fonts`, SIL OFL), square corners and 1px rules instead of shadows. Status is a dot beside a word: a filled gold dot means backed up or running, a hollow ring means paused or waiting, and the danger colour means it needs attention. Tokens are at the top of `app/ui/style.css`, and light and dark follow the operating system. The "Refresh" icon keeps its two looping arrows, now charcoal on a warm-white tile with a gold centre. Screens: [Backer app redesign](https://claude.ai/artifact/2dNdoQ8ML1kFtPT86Q6uyC).
 
 ## Status and roadmap
 
