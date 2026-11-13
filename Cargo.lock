@@ -37,6 +37,7 @@ dependencies = [
  "backer-license",
  "backer-mcp",
  "backer-removal",
+ "backer-restore",
  "backer-sched",
  "backer-store",
  "getrandom 0.3.4",
@@ -110,6 +111,17 @@ dependencies = [
  "backer-store",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "backer-restore"
+version = "0.1.0"
+dependencies = [
+ "backer-connector",
+ "backer-core",
+ "blake3",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

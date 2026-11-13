@@ -28,6 +28,30 @@ pub struct PutResult {
     pub size: u64,
 }
 
+/// One entry in a folder on the NAS, for browsing a backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+/// Read-only access used by restore: list a folder and read a file back. Separate from `Connector`
+/// so each destination type opts in, and nothing here can change the NAS.
+pub trait Reader: Send + Sync {
+    /// Entries in `rel_dir` ("" is the destination root). Backer's own marker and temp files are left out.
+    /// A folder that does not exist is an empty list.
+    fn list_dir(&self, rel_dir: &str) -> Result<Vec<DirEntry>>;
+    /// Stream a file on the NAS into `out`. Returns the number of bytes written.
+    fn read_file(&self, rel: &str, out: &mut dyn Write) -> Result<u64>;
+}
+
+/// True for files Backer itself keeps on the NAS (the marker and leftover temp files), never shown to people.
+pub fn is_backer_file(name: &str) -> bool {
+    name == DEST_MARKER || (name.starts_with(".backer-") && name.ends_with(".part"))
+}
+
 /// Can remove leftover temp files created by this app (never user files).
 pub trait TempCleaner: Connector {
     fn remove_temp(&self, rel: &str) -> Result<()>;
@@ -209,6 +233,39 @@ impl Connector for MountedConnector {
     }
 }
 
+fn mtime_secs(m: &fs::Metadata) -> i64 {
+    m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+impl Reader for MountedConnector {
+    fn list_dir(&self, rel_dir: &str) -> Result<Vec<DirEntry>> {
+        let d = if rel_dir.is_empty() { long_path(self.root.clone()) } else { self.full(rel_dir)? };
+        let rd = match fs::read_dir(&d) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(cerr(e)),
+        };
+        let mut out = vec![];
+        for e in rd {
+            let e = e.map_err(cerr)?;
+            let name = e.file_name().to_string_lossy().to_string();
+            if is_backer_file(&name) {
+                continue;
+            }
+            // Follow symlinks the way the OS shows them; skip entries that vanish or can't be read.
+            let Ok(m) = fs::metadata(e.path()) else { continue };
+            out.push(DirEntry { name, is_dir: m.is_dir(), size: if m.is_dir() { 0 } else { m.len() }, mtime: mtime_secs(&m) });
+        }
+        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        Ok(out)
+    }
+
+    fn read_file(&self, rel: &str, out: &mut dyn Write) -> Result<u64> {
+        let mut f = File::open(self.full(rel)?).map_err(cerr)?;
+        std::io::copy(&mut f, out).map_err(cerr)
+    }
+}
+
 impl TempCleaner for MountedConnector {
     fn remove_temp(&self, rel: &str) -> Result<()> {
         let name = Path::new(rel).file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -270,6 +327,23 @@ mod tests {
         let (_d, c) = setup();
         assert!(c.stat("../x").is_err());
         assert!(c.stat("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn reader_lists_folders_first_and_hides_backer_files() {
+        let (d, c) = setup();
+        fs::create_dir_all(d.path().join("m/Docs")).unwrap();
+        fs::write(d.path().join("m/b.txt"), b"bb").unwrap();
+        fs::write(d.path().join("m/A.txt"), b"a").unwrap();
+        fs::write(d.path().join("m/.backer-3-1.part"), b"x").unwrap();
+        let names: Vec<_> = c.list_dir("m").unwrap().into_iter().map(|e| (e.name, e.is_dir, e.size)).collect();
+        assert_eq!(names, vec![("Docs".into(), true, 0), ("A.txt".into(), false, 1), ("b.txt".into(), false, 2)]);
+        assert!(c.list_dir("").unwrap().iter().all(|e| e.name != DEST_MARKER));
+        assert!(c.list_dir("nope").unwrap().is_empty());
+        assert!(c.list_dir("../x").is_err());
+        let mut s = vec![];
+        assert_eq!(c.read_file("m/b.txt", &mut s).unwrap(), 2);
+        assert_eq!(s, b"bb");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Safety rule: the MCP crate must never depend (even transitively) on the engine, removal or connector crates.
+# Safety rule: the MCP crate must never depend (even transitively) on the engine, removal, restore or connector crates.
 set -euo pipefail
 deps=$(cargo tree -p backer-mcp --prefix none --edges normal | awk '{print $1}' | sort -u)
-for forbidden in backer-engine backer-removal backer-connector backer-store; do
+for forbidden in backer-engine backer-removal backer-restore backer-connector backer-store; do
   if echo "$deps" | grep -qx "$forbidden"; then
     echo "FAIL: backer-mcp depends on $forbidden" >&2; exit 1
   fi

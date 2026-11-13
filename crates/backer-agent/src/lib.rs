@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
+pub mod restore;
 pub mod server;
 pub mod platform;
 
@@ -47,6 +48,7 @@ pub struct Agent {
     /// A job set-up an assistant asked for (suggested name). The user completes or dismisses it in the app.
     new_job_request: Mutex<Option<String>>,
     pub licensing: licensing::Licensing,
+    restores: restore::Restores,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -57,7 +59,7 @@ impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), restores: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
@@ -65,7 +67,7 @@ impl Agent {
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), restores: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -87,6 +89,13 @@ impl Agent {
         let job = self.store()?.get_job(id)?.ok_or_else(|| Error::Invalid(format!("no job {id}")))?;
         if !self.licensing.may_back_up(now_ts().as_second()) {
             return Err(Error::Invalid(licensing::TRIAL_ENDED.into()));
+        }
+        // Don't back up a folder while files are being restored into it; a scheduled run waits for the next tick.
+        if self.restoring(id) {
+            if trigger == Trigger::Schedule {
+                return Ok(Start::AlreadyRunning);
+            }
+            return Err(Error::Invalid("Backer is restoring files for this job. Back up again when the restore has finished.".into()));
         }
         let cancel = {
             let mut st = self.state.lock().unwrap();
@@ -217,12 +226,12 @@ impl Agent {
         Ok(json!({"deleted": true}))
     }
 
-    fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
+    pub(crate) fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
 }
 
-fn es(e: Error) -> String {
+pub(crate) fn es(e: Error) -> String {
     e.to_string()
 }
 
@@ -340,6 +349,13 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
                 c.init_marker().map_err(es)?;
                 Ok(json!({"ok": true}))
             }
+            // Restore (app only; assistants cannot write to this computer).
+            "browse_backup" => agent.browse_backup(need()?, p.get("path").and_then(Value::as_str).unwrap_or("")),
+            "plan_restore" => agent.plan_restore(need()?, &p),
+            "start_restore" => agent.start_restore(p.get("plan_id").and_then(Value::as_u64).ok_or("plan_id required")?, p.get("replace").and_then(Value::as_bool).unwrap_or(false)),
+            "restore_status" => Ok(agent.restore_status()),
+            "cancel_restore" => Ok(json!({"cancelled": agent.cancel_restore()})),
+            "dismiss_restore" => { agent.dismiss_restore(); Ok(json!({"ok": true})) }
             "list_deleted" => serde_json::to_value(agent.store().map_err(es)?.list_deleted(id).map_err(es)?).map_err(|e| e.to_string()),
             "keep_deleted" => {
                 let s = agent.store().map_err(es)?;
@@ -571,5 +587,75 @@ mod tests {
         let j = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
         assert_eq!(j.schedule, Schedule::Manual);
         assert_eq!(j.dest_root, t.dst.to_string_lossy());
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::fs;
+
+    fn setup() -> (tempfile::TempDir, PathBuf, Arc<Agent>, JobId) {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("nas"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a"), b"1").unwrap();
+        let agent = Agent::new_sync(t.path().join("db.sqlite"), TimeZone::get("America/Los_Angeles").unwrap()).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
+        ui("init_destination", json!({"path": dst}));
+        let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+        let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
+        agent.start_job(id).unwrap();
+        (t, src, agent, id)
+    }
+
+    #[test]
+    fn restore_is_not_an_assistant_tool() {
+        let names: Vec<String> = backer_mcp::tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect();
+        assert!(names.iter().all(|n| !n.contains("restore") && !n.contains("browse")), "{names:?}");
+    }
+
+    #[test]
+    fn restore_works_after_the_trial_ends() {
+        let (t, src, agent, id) = setup();
+        let started = now_ts().as_second() - 30 * 86_400;
+        fs::write(t.path().join("license.json"), json!({"first_run": started, "last_seen": started, "key": null}).to_string()).unwrap();
+        let agent2 = Agent::new_sync(t.path().join("db.sqlite"), TimeZone::get("America/Los_Angeles").unwrap()).unwrap();
+        drop(agent);
+        fs::remove_file(src.join("a")).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&agent2, &json!({"method": m, "params": p}));
+        assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
+        let plan = ui("plan_restore", json!({"job_id": id, "paths": ["mac/src/a"]}));
+        assert_eq!(ui("start_restore", json!({"plan_id": plan["result"]["plan_id"], "replace": false}))["ok"], true);
+        assert_eq!(fs::read(src.join("a")).unwrap(), b"1");
+    }
+
+    #[test]
+    fn stale_or_unknown_plans_are_refused() {
+        let (_t, _src, agent, id) = setup();
+        let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
+        assert_eq!(ui("start_restore", json!({"plan_id": 999}))["ok"], false);
+        // Only the newest few plans are kept.
+        let first = ui("plan_restore", json!({"job_id": id, "paths": ["mac/src"]}))["result"]["plan_id"].clone();
+        for _ in 0..5 {
+            ui("plan_restore", json!({"job_id": id, "paths": ["mac/src"]}));
+        }
+        assert!(ui("start_restore", json!({"plan_id": first}))["error"].as_str().unwrap().contains("out of date"));
+        assert_eq!(ui("plan_restore", json!({"job_id": id, "paths": []}))["ok"], false);
+    }
+
+    #[test]
+    fn backups_wait_while_restoring_into_the_job() {
+        let (_t, _src, agent, id) = setup();
+        // Pretend a restore is in progress for this job.
+        let plan = agent.plan_restore(id, &json!({"paths": ["mac/src"]})).unwrap();
+        assert!(plan["plan_id"].as_u64().is_some());
+        agent.fake_running_restore(id);
+        assert!(agent.restoring(id));
+        assert!(agent.start_job(id).unwrap_err().to_string().contains("restoring"));
+        assert_eq!(agent.start_job_as(id, Trigger::Schedule).unwrap(), Start::AlreadyRunning);
+        assert!(agent.start_restore(plan["plan_id"].as_u64().unwrap(), false).unwrap_err().contains("already in progress"));
     }
 }

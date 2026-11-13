@@ -25,6 +25,8 @@ function toast(msg, bad) {
 let view = 'jobs', detailId = null, timer = null;
 // Run screen state. Kept here so the 3-second refresh and "Load more" don't lose the filter or the rows already shown.
 let runId = null, runLive = false, histLimit = 15, histFilter = 'all';
+// Browse and restore: which job, which NAS folder, and what is ticked.
+let browse = null;
 const PAGE = 200;
 let logState = { kind: 'all', search: '', rows: [], total: 0 };
 
@@ -109,6 +111,7 @@ async function render() {
     showUpdate().catch(() => {});
     const pending = jobs.reduce((n, j) => n + j.pending_deleted, 0);
     const b = $('#badge'); b.hidden = !pending; b.textContent = pending;
+    if (view === 'jobs' && browse) return await renderBrowse();
     if (view === 'jobs') return runId ? await renderRun(runId) : detailId ? await renderDetail(detailId) : renderJobs(jobs, pending);
     if (view === 'deleted') return await renderDeleted();
     if (view === 'settings') return await renderSettings();
@@ -155,7 +158,7 @@ async function renderDetail(id) {
   const rr = shown.map(r => `<tr class="click" tabindex="0" data-openrun="${r.id}"><td><b>${fmtTime(r.started)}</b></td><td class="num dim">${fmtDur(runMs(r))}</td><td class="num">${fmtN(r.stats.copied)}</td><td class="num">${r.stats.bytes ? fmtBytes(r.stats.bytes) : '—'}</td><td>${resultPill(r)}</td><td class="chev" aria-hidden="true">›</td></tr>`).join('');
   const last = runs[0];
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / ${esc(j.job.name)}</div>
-    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button data-verify="${id}">Verify backup</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
+    <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button data-verify="${id}">Verify backup</button><button data-browse="${id}">Browse and restore</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
     ${last ? `<div class="card strip"><div><div class="lbl">Last backup</div><div class="big">${fmtTime(last.started)}</div><div>${resultPill(last)}</div></div><div><div class="lbl">Last ${Math.min(15, runs.length)} runs · taller means more copied</div>${sparkline(runs)}</div></div>` : ''}
     <div class="row" style="margin-top:24px"><h2 style="flex:1;margin:0">Run history</h2><span class="chips"><button class="chip ${histFilter === 'all' ? 'on' : ''}" data-hist="all">All</button><button class="chip ${histFilter === 'attention' ? 'on' : ''}" data-hist="attention">Needs attention</button></span></div>
@@ -220,7 +223,7 @@ async function renderRun(id) {
   const chips = CHIPS.filter(([k]) => k === 'all' || rep.counts[k]).map(([k, l]) => `<button class="chip ${logState.kind === k ? 'on' : ''}" data-chip="${k}">${l} <b>${fmtN(k === 'all' ? rep.log_rows : rep.counts[k])}</b></button>`).join('');
   const pruned = !rep.log_rows && !runLive && (s.copied || s.skipped || s.warnings || s.errors);
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back-run>${esc(j.job.name)}</a></div>
-    <div class="row"><h1 style="flex:1">Run on ${fmtTime(r.started)}</h1>${rep.log_rows ? '<button data-export>Export log</button>' : ''}<button class="pri" data-run="${r.job_id}">Back up again</button></div>
+    <div class="row"><h1 style="flex:1">Run on ${fmtTime(r.started)}</h1>${rep.log_rows ? '<button data-export>Export log</button>' : ''}<button data-browse="${r.job_id}">Restore files</button><button class="pri" data-run="${r.job_id}">Back up again</button></div>
     <div class="sub">${esc(sub)}</div>
     <div class="banner2 ${banner[0]}"><b>${esc(banner[1])}</b><span>${esc(banner[2])}</span></div>
     <div class="tiles">${tiles}</div>
@@ -281,6 +284,101 @@ async function renderDeleted() {
     d.showModal(); $('#c', d).onclick = () => d.close();
     $('#go', d).onclick = async () => { for (const [job, paths] of Object.entries(byJob(ps))) await call('remove_deleted', { job_id: +job, paths }); d.close(); render(); };
   };
+}
+
+// ---- Browse and restore (spec FR-31). Reads the NAS; asks before replacing anything on this computer.
+async function renderBrowse() {
+  const b = browse, j = await call('get_job', { job_id: b.jobId });
+  let list, error = '';
+  try { list = await call('browse_backup', { job_id: b.jobId, path: b.path }); } catch (e) { error = String((e && e.message) || e); }
+  const parts = b.path ? b.path.split('/') : [];
+  // The top level shows the job's folders, so the crumbs start at the backed-up folder, not the NAS root.
+  const top = j.job.folders.find(f => b.path === f.dest || b.path.startsWith(f.dest + '/'));
+  const crumbs = [`<a href="#" data-bpath="">All folders</a>`];
+  if (top) {
+    const skip = top.dest.split('/').length - 1;
+    parts.forEach((p, i) => { if (i >= skip) crumbs.push(`<a href="#" data-bpath="${esc(parts.slice(0, i + 1).join('/'))}">${esc(p)}</a>`); });
+  }
+  const rows = (list ? list.entries : []).map(e => `<tr${e.is_dir ? ` class="click" data-bpath="${esc(e.path)}" tabindex="0"` : ''}>
+      <td style="width:28px"><input type="checkbox" style="width:auto;height:auto" data-bpick="${esc(e.path)}" data-dir="${e.is_dir}" data-size="${e.size}" ${b.picked.has(e.path) ? 'checked' : ''} aria-label="Select ${esc(e.name)}"></td>
+      <td>${e.is_dir ? '<span aria-hidden="true">▸ </span>' : ''}<b>${esc(e.name)}</b>${e.source ? `<div class="mono dim">from ${esc(e.source)}</div>` : ''}</td>
+      <td class="num">${e.is_dir ? '—' : fmtBytes(e.size)}</td><td>${e.mtime ? fmtTime(e.mtime) : '—'}</td></tr>`).join('');
+  const n = b.picked.size;
+  $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / <a href="#" data-open="${b.jobId}">${esc(j.job.name)}</a> / Browse and restore</div>
+    <div class="row"><h1 style="flex:1">Browse backup</h1></div>
+    <div class="sub">What is on your NAS for this job. Tick files or folders, then choose Restore to put them back where they came from, or Restore to… to pick another folder. Nothing on the NAS is changed, and nothing on this computer is replaced unless you say so.</div>
+    <div class="sub mono" style="margin-top:12px">${crumbs.join(' / ')}</div>
+    ${error ? `<div class="banner">${esc(isDest(error) ? 'Your NAS isn’t reachable. Connect to it, then try again.' : error)}</div>`
+      : rows ? `<table style="margin-top:8px"><thead><tr><th></th><th>Name</th><th class="num">Size</th><th>Modified</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="card">This folder is empty.</div>'}
+    <div class="row" style="margin-top:12px"><span class="sub" style="flex:1;white-space:nowrap" id="bsel">${n ? `${n} selected` : 'Nothing selected'}</span>
+      <button id="bclear" ${n ? '' : 'disabled'}>Clear</button><button id="bother" ${n ? '' : 'disabled'}>Restore to…</button><button class="pri" id="borig" ${n ? '' : 'disabled'}>Restore</button></div>`;
+  document.querySelectorAll('#main [data-bpath]').forEach(el => el.addEventListener('click', ev => {
+    if (ev.target.matches('input')) return;
+    ev.preventDefault(); ev.stopPropagation(); browse.path = el.dataset.bpath; renderBrowse();
+  }));
+  document.querySelectorAll('#main [data-bpick]').forEach(el => el.addEventListener('change', () => {
+    if (el.checked) b.picked.set(el.dataset.bpick, true); else b.picked.delete(el.dataset.bpick);
+    renderBrowse();
+  }));
+  $('#bclear').onclick = () => { b.picked.clear(); renderBrowse(); };
+  $('#borig').onclick = () => planRestore(null);
+  $('#bother').onclick = async () => { const dir = await T.dialog.open({ directory: true }); if (dir) planRestore(dir); };
+}
+
+async function planRestore(target) {
+  const b = browse, d = $('#dlg'), paths = [...b.picked.keys()];
+  const where = target ? esc(target) : 'their original location';
+  d.innerHTML = '<h1 style="font-size:18px">Getting ready…</h1><p>Listing the files to restore and checking what is already on this computer.</p>';
+  d.showModal();
+  let plan;
+  try { plan = await call('plan_restore', { job_id: b.jobId, paths, target }); }
+  catch (e) { d.innerHTML = `<h1 style="font-size:18px">Couldn’t restore</h1><p>${esc((e && e.message) || e)}</p><div class="row" style="justify-content:flex-end"><button id="c">Close</button></div>`; $('#c', d).onclick = () => d.close(); return; }
+  const files = `${fmtN(plan.files)} file${plan.files === 1 ? '' : 's'} (${fmtBytes(plan.bytes)})`;
+  if (!plan.files) { d.innerHTML = '<h1 style="font-size:18px">Nothing to restore</h1><p>The selected folders are empty on the NAS.</p><div class="row" style="justify-content:flex-end"><button id="c">Close</button></div>'; $('#c', d).onclick = () => d.close(); return; }
+  const replaceable = plan.conflicts_total - plan.blocked_total;
+  if (!plan.conflicts_total) {
+    d.innerHTML = `<h1 style="font-size:18px">Restore ${files}?</h1><p>They will be copied from the NAS to ${where}. Nothing there is replaced.</p>
+      <div class="row" style="justify-content:flex-end"><button id="c">Cancel</button><button class="pri" id="keep">Restore</button></div>`;
+  } else {
+    const row = c => `<tr><td class="mono">${esc(c.local)}</td><td>${c.blocked ? 'A folder is in the way' : `${fmtBytes(c.local_size)} · ${fmtTime(c.local_mtime)}`}</td><td>${fmtBytes(c.nas_size)} · ${fmtTime(c.nas_mtime)}</td></tr>`;
+    d.innerHTML = `<h1 style="font-size:18px">${fmtN(plan.conflicts_total)} file${plan.conflicts_total === 1 ? ' is' : 's are'} already on this computer</h1>
+      <p>Restoring ${files} to ${where}. These files already exist there. Backer replaces them only if you choose to; the rest are restored either way.</p>
+      <div style="max-height:260px;overflow:auto"><table><thead><tr><th>On this computer</th><th>Yours now</th><th>Backup on NAS</th></tr></thead><tbody>${plan.conflicts.map(row).join('')}</tbody></table></div>
+      ${plan.conflicts_total > plan.conflicts.length ? `<div class="sub">…and ${fmtN(plan.conflicts_total - plan.conflicts.length)} more.</div>` : ''}
+      ${plan.blocked_total ? `<div class="sub">${fmtN(plan.blocked_total)} can’t be restored because a folder has the same name.</div>` : ''}
+      <div class="row" style="justify-content:flex-end;margin-top:16px"><button id="c">Cancel</button><button id="keep">Keep my files</button>${replaceable ? `<button class="bad" id="repl">Replace ${fmtN(replaceable)}</button>` : ''}</div>`;
+  }
+  $('#c', d).onclick = () => d.close();
+  $('#keep', d).onclick = () => runRestore(plan.plan_id, false);
+  if ($('#repl', d)) $('#repl', d).onclick = () => runRestore(plan.plan_id, true);
+}
+
+async function runRestore(planId, replace) {
+  const d = $('#dlg');
+  try { await call('start_restore', { plan_id: planId, replace }); }
+  catch (e) { d.innerHTML = `<h1 style="font-size:18px">Couldn’t restore</h1><p>${esc((e && e.message) || e)}</p><div class="row" style="justify-content:flex-end"><button id="c">Close</button></div>`; $('#c', d).onclick = () => d.close(); return; }
+  for (;;) {
+    let st; try { st = await call('restore_status'); } catch { st = null; }
+    const r = st && st.report;
+    if (!r) break;
+    if (r.status === 'running') {
+      const pct = r.bytes_total ? Math.floor(r.bytes_done / r.bytes_total * 100) : 0;
+      d.innerHTML = `<h1 style="font-size:18px">Restoring…</h1><p>${fmtN(r.files_done)} of ${fmtN(r.files_total)} files · ${fmtBytes(r.bytes_done)} of ${fmtBytes(r.bytes_total)} (${pct}%)</p>
+        <progress max="100" value="${pct}" style="width:100%"></progress><div class="row" style="justify-content:flex-end"><button id="stop">Stop</button></div>`;
+      $('#stop', d).onclick = () => call('cancel_restore');
+      await new Promise(res => setTimeout(res, 500));
+      continue;
+    }
+    const title = r.status === 'done' ? (r.failed_total ? 'Restored, with problems' : 'Restored') : r.status === 'cancelled' ? 'Restore stopped' : 'Couldn’t restore';
+    const bits = [`${fmtN(r.restored)} restored`, r.replaced ? `${fmtN(r.replaced)} replaced` : '', r.skipped_existing ? `${fmtN(r.skipped_existing)} kept as they were` : '', r.failed_total ? `${fmtN(r.failed_total)} couldn’t be restored` : ''].filter(Boolean).join(' · ');
+    d.innerHTML = `<h1 style="font-size:18px">${title}</h1><p>${esc(r.message ? (isDest(r.message) ? 'Your NAS isn’t reachable. Connect to it, then try again.' : r.message) : bits)}</p>
+      ${r.status === 'cancelled' ? '<p>Files already restored stay where they are.</p>' : ''}
+      ${r.failed.length ? `<div class="card mono" style="max-height:200px;overflow:auto">${r.failed.map(f => `${esc(f.path)}: ${esc(f.error)}`).join('<br>')}</div>` : ''}
+      <div class="row" style="justify-content:flex-end"><button class="pri" id="c">Done</button></div>`;
+    $('#c', d).onclick = async () => { await call('dismiss_restore').catch(() => {}); d.close(); if (browse) { browse.picked.clear(); renderBrowse(); } };
+    return;
+  }
+  d.close();
 }
 
 async function renderSettings() {
@@ -373,11 +471,11 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate]'); if (!t) return;
+  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate],[data-browse]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
-  else if (ds.open) { detailId = +ds.open; histLimit = 15; histFilter = 'all'; }
+  else if (ds.open) { detailId = +ds.open; histLimit = 15; histFilter = 'all'; browse = null; }
   else if (ds.openrun) { runId = +ds.openrun; logState = { kind: 'all', search: '', rows: [], total: 0 }; }
   else if (ds.backRun !== undefined) { runId = null; }
   else if (ds.chip) { logState.kind = ds.chip; await loadLogOrRender(); return; }
@@ -385,7 +483,7 @@ document.addEventListener('click', async e => {
   else if (ds.export !== undefined) { try { await exportLog(); } catch (e) { toast('Could not save the log: ' + (e && e.message || e), true); } return; }
   else if (ds.hist) { histFilter = ds.hist; }
   else if (ds.histmore !== undefined) { histLimit += 15; }
-  else if (ds.back !== undefined) { detailId = null; runId = null; }
+  else if (ds.back !== undefined) { detailId = null; runId = null; browse = null; }
   else if (ds.delete) {
     const d = $('#dlg'), id = +ds.delete;
     const j = await call('get_job', { job_id: id });
@@ -432,7 +530,8 @@ document.addEventListener('click', async e => {
   }
   else if (ds.approve) { await call('approve_mcp_client', { identity: ds.approve }); }
   else if (ds.revoke) { await call('revoke_mcp_client', { identity: ds.revoke }); }
-  else if (ds.go) { view = ds.go; runId = null; detailId = null; }
+  else if (ds.browse) { browse = { jobId: +ds.browse, path: '', picked: new Map() }; }
+  else if (ds.go) { view = ds.go; runId = null; detailId = null; browse = null; }
   render();
 });
 // A chip click on the run page redraws the chips and rows without losing the page.
@@ -444,5 +543,5 @@ document.addEventListener('input', e => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { logState.search = e.target.value.trim(); loadLog(true); }, 250);
 });
-document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; render(); }));
-render(); timer = setInterval(() => { if (!$('#dlg').open && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);
+document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; browse = null; render(); }));
+render(); timer = setInterval(() => { if (!$('#dlg').open && !browse && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);

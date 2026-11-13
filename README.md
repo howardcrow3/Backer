@@ -23,6 +23,7 @@ Backer is a desktop app for macOS and Windows. You pick the folders, pick a fold
 - **Flexible schedules.** Run on demand, every few hours, daily, or on chosen weekdays. If the computer was asleep or off at the scheduled time, Backer can catch up at the next opportunity.
 - **Built for big folders.** Designed for well over 100,000 files. Each run compares size and modification time and copies only what changed.
 - **Safe copies.** Each file is written to a temporary file next to its destination, checked with a BLAKE3 checksum, then renamed into place. Leftovers from an interrupted run are cleaned up.
+- **Browse and restore.** Open a job's backup inside the app, tick files or folders, and restore them to where they came from or to another folder. Backer lists any file that already exists and replaces it only if you say so. Restoring only reads the NAS, and still works after the trial ends.
 - **Never deletes without asking.** Files you delete on your computer stay on the NAS and appear under **Deleted files**. Backer removes one from the NAS only after you select it and confirm.
 - **Won't write to the wrong place.** A marker file in the NAS folder proves the share is really mounted, so an unmounted NAS can't fill your local disk.
 - **Clear run summaries.** Every run records what was copied, skipped or couldn't be read, with per-folder numbers, problems grouped by cause, and a searchable file log you can export as CSV.
@@ -85,7 +86,7 @@ cargo tauri icon ../icon-source.png                        # generates the platf
 cargo tauri build                                          # produces the .app and .dmg (or the Windows installer)
 ```
 
-Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on a Mac) so the app can install it as the background service. CI builds both installers on every push; see `.github/workflows/ci.yml`.
+Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on a Mac) so the app can install it as the background service. CI runs the unit and integration tests on macOS, Windows and Linux on every push and pull request, and builds both installers only after they pass; see `.github/workflows/ci.yml`.
 
 ## Project layout
 
@@ -96,6 +97,7 @@ Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on 
 | `crates/backer-connector` | destination access; `Connector` has no delete; `Eraser` is separate |
 | `crates/backer-engine` | scan, diff, copy (temp file, verify, atomic rename), flag missing files |
 | `crates/backer-removal` | the only code that can delete from the NAS, and only reviewed files |
+| `crates/backer-restore` | browse a job's backup and copy files back; reads the NAS only and never replaces a local file the user didn't confirm |
 | `crates/backer-sched` | schedule maths, DST-safe, catch-up after sleep |
 | `crates/backer-mcp` | MCP server logic; cannot depend on engine, removal or store |
 | `crates/backer-agent` | background service: scheduler, local sockets, approvals, login start-up |
@@ -108,6 +110,6 @@ Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on 
 
 ## Status and roadmap
 
-Backer is early software. Backing up, scheduling, the deleted-files review, run summaries and the tray work on macOS and Windows.
+Backer is early software. Backing up, scheduling, browse and restore, the deleted-files review, run summaries and the tray work on macOS and Windows.
 
-Not built yet: an SFTP connector, browse-and-restore inside the app, version history, code signing and notarization, an Intel Mac build, and a log file for the service itself.
+Not built yet: an SFTP connector, version history, code signing and notarization, an Intel Mac build, and a log file for the service itself.

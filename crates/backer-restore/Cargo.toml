@@ -1,0 +1,14 @@
+[package]
+name = "backer-restore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+backer-core.workspace = true
+backer-connector.workspace = true
+blake3.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

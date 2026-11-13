@@ -31,3 +31,4 @@ backer-sched = { path = "crates/backer-sched" }
 backer-license = { path = "crates/backer-license" }
 backer-mcp = { path = "crates/backer-mcp" }
 backer-removal = { path = "crates/backer-removal" }
+backer-restore = { path = "crates/backer-restore" }
