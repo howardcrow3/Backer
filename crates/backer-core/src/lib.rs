@@ -14,6 +14,13 @@ pub enum Error {
     Connector(String),
     #[error("destination not ready: {0}")]
     DestinationNotReady(String),
+    /// The NAS refused the user name, password or key. Never retried (spec 8.2), so a NAS that
+    /// blocks an address after repeated bad logins is not triggered.
+    #[error("credentials rejected: {0}")]
+    Credentials(String),
+    /// The SFTP server's host key is not the one pinned on first connect. Blocks runs until the user approves it.
+    #[error("host key changed: {0}")]
+    HostKey(String),
     #[error("invalid: {0}")]
     Invalid(String),
     #[error("cancelled")]
@@ -56,7 +63,9 @@ pub struct Job {
     pub id: JobId,
     pub name: String,
     pub folders: Vec<FolderPair>,
-    /// Root of the NAS destination as a mounted path (e.g. /Volumes/backups).
+    /// Root of the NAS destination: a mounted path (e.g. /Volumes/backups) or a connection URL
+    /// (sftp://user@nas/volume1/backups, smb://user@nas/share/folder, nfs://nas/volume1/backups).
+    /// Passwords and keys are never part of it; they live in the OS credential store.
     pub dest_root: String,
     pub schedule: Schedule,
     pub paused: bool,

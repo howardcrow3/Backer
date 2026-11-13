@@ -440,7 +440,7 @@ function wizard(suggested = '') {
   const draw = () => {
     const body = [
       `<h1>Which folders do you want to back up?</h1>${w.folders.map((f, i) => `<div class="card row"><span class="mono" style="flex:1">${esc(f)}</span><button class="link" data-rm="${i}">Remove</button></div>`).join('')}<button id="add">Add folder…</button>`,
-      `<h1>Where should the backup go?</h1><div class="sub">${isWin ? 'Connect to your NAS share in File Explorer first (for example map it to a drive letter, or open \\\\nas\\share), then choose its folder.' : 'Mount your NAS share in Finder first (Go ▸ Connect to Server), then choose its folder.'}</div><div class="row"><input id="root" class="mono" readonly value="${esc(w.dest_root)}" placeholder="${isWin ? 'Z:\\\\backups' : '/Volumes/backups'}"><button id="pick">Choose…</button></div><label>Subfolder on the NAS (optional)</label><input id="base" value="${esc(w.dest_base)}" placeholder="Leave blank to back up straight into the folder above"><div class="sub">Each folder you back up gets a folder of the same name inside the destination.</div><div class="sub" style="margin-top:8px">New destinations are marked with a small file so the app never writes to an unmounted share.</div>`,
+      nasStep.html(w),
       `<h1>When should it run?</h1><label>Schedule</label><select id="sched">${[['manual', 'Only when I click Run now'], ['every_minutes', 'Every few minutes'], ['every_hours', 'Every few hours'], ['daily', 'Every day'], ['weekly', 'Certain days'], ['monthly', 'Once a month']].map(([v, t]) => `<option value="${v}" ${w.sched === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
         ${w.sched === 'every_minutes' ? `<label>Minutes</label><input id="minutes" type="number" min="5" max="1440" step="1" value="${w.minutes}"><div class="sub">Between 5 and 1440. Counted from the start of the last backup; a run still in progress is never doubled up.</div>` : ''}
         ${w.sched === 'monthly' ? `<label>Day of the month</label><input id="mday" type="number" min="1" max="31" value="${w.mday}">${w.mday >= 29 ? '<div class="sub">In months without this day, it runs on the last day of the month.</div>' : ''}` : ''}
@@ -460,9 +460,11 @@ function wizard(suggested = '') {
     d.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { w.folders.splice(+b.dataset.rm, 1); draw(); });
     if ($('#pick', d)) $('#pick', d).onclick = async () => { const p = await T.dialog.open({ directory: true, defaultPath: isWin ? undefined : '/Volumes' }); if (p) { w.dest_root = p; draw(); } };
     if ($('#sched', d)) $('#sched', d).onchange = e => { read(); w.sched = e.target.value; draw(); };
+    if (step === 1) nasStep.bind(w, d, draw);
   };
   function read() {
     const v = id => $('#' + id, d);
+    if (step === 1 && w.nas) nasStep.readForm(w, d);
     if (v('base')) w.dest_base = v('base').value.trim().replace(/^[\\/]+|[\\/]+$/g, '').replace(/\\/g, '/');
     if (v('hours')) w.hours = +v('hours').value;
     if (v('minutes')) w.minutes = +v('minutes').value;
@@ -477,7 +479,7 @@ function wizard(suggested = '') {
   async function next() {
     read(); error = '';
     if (step === 0 && !w.folders.length) error = 'Add at least one folder.';
-    if (step === 1 && !w.dest_root) error = 'Choose the folder on your NAS.';
+    if (step === 1 && !w.dest_root) error = w.nas && w.nas.proto !== 'mounted' ? 'Connect, choose a folder on the NAS and click “Back up into”.' : 'Choose the folder on your NAS.';
     if (step === 2 && w.sched === 'every_minutes' && !(Number.isInteger(w.minutes) && w.minutes >= 5 && w.minutes <= 1440)) error = 'Choose between 5 and 1440 minutes.';
     if (step === 2 && w.sched === 'monthly' && !(Number.isInteger(w.mday) && w.mday >= 1 && w.mday <= 31)) error = 'Choose a day from 1 to 31.';
     if (step === 1 && !error) {

@@ -38,7 +38,7 @@ impl Agent {
     pub fn browse_backup(&self, id: JobId, path: &str) -> std::result::Result<Value, String> {
         let store = self.store().map_err(es)?;
         let job = self.require_job(&store, id)?;
-        let entries = backer_restore::browse(&Agent::connector_for(&job), &job, path).map_err(es)?;
+        let entries = backer_restore::browse(&*self.connector_for(&job), &job, path).map_err(es)?;
         Ok(json!({"path": path.trim_matches('/'), "entries": entries}))
     }
 
@@ -49,7 +49,7 @@ impl Agent {
         let job = self.require_job(&store, id)?;
         let items: Vec<String> = p.get("paths").and_then(Value::as_array).ok_or("paths required")?.iter().filter_map(|x| x.as_str().map(String::from)).collect();
         let target = target_of(p);
-        let plan = backer_restore::plan(&Agent::connector_for(&job), &job, &items, &target, &AtomicBool::new(false)).map_err(es)?;
+        let plan = backer_restore::plan(&*self.connector_for(&job), &job, &items, &target, &AtomicBool::new(false)).map_err(es)?;
         let conflicts: Vec<_> = plan.conflicts.iter().take(SHOW_CONFLICTS).collect();
         let mut out = json!({
             "files": plan.files.len(), "bytes": plan.bytes,
@@ -96,14 +96,14 @@ impl Agent {
         }
         let replace: HashSet<PathBuf> = if replace { plan.replaceable() } else { HashSet::new() };
         let active = self.restores.active.clone();
+        let conn = self.connector_for(&job);
         let work = move || {
-            let conn = Agent::connector_for(&job);
             let set = |r: &Report| {
                 if let Some(a) = active.lock().unwrap().as_mut() {
                     a.report = r.clone();
                 }
             };
-            let fin = backer_restore::execute(&conn, &plan, &replace, &cancel, &|r| set(r));
+            let fin = backer_restore::execute(&*conn, &plan, &replace, &cancel, &|r| set(r));
             set(&fin);
         };
         if self.sync_runs {

@@ -3,14 +3,16 @@ pub mod approvals;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
+pub mod nas;
 pub mod notify;
 pub mod restore;
 pub mod retry;
+pub mod secrets;
 pub mod server;
 pub mod platform;
 
 use jiff::{tz::TimeZone, Timestamp};
-use backer_connector::{Connector, MountedConnector};
+use backer_connector::{hostkeys::HostKeys, Access, Destination, Nas};
 use backer_core::*;
 use backer_engine::{run_job_as, verify_job, NoProgress};
 use backer_mcp::Control;
@@ -54,6 +56,10 @@ pub struct Agent {
     /// FR-18: how long to wait for an unreachable NAS before a run is marked failed.
     retry: retry::RetryPolicy,
     notifier: Arc<dyn notify::Notifier>,
+    /// NAS passwords and keys (the OS credential store).
+    pub secrets: Box<dyn secrets::SecretStore>,
+    /// SFTP host keys pinned on first connect.
+    pub host_keys: HostKeys,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -64,7 +70,8 @@ impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), retry: retry::RetryPolicy::default(), notifier: Arc::new(notify::SystemNotifier), restores: Default::default() });
+        let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier: Arc::new(notify::SystemNotifier), restores: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
@@ -77,7 +84,8 @@ impl Agent {
     pub fn new_sync_with(db_path: PathBuf, tz: TimeZone, retry: retry::RetryPolicy, notifier: Arc<dyn notify::Notifier>) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), retry, notifier, restores: Default::default() });
+        let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -87,8 +95,25 @@ impl Agent {
         Store::open(&self.db_path)
     }
 
-    pub fn connector_for(job: &Job) -> MountedConnector {
-        MountedConnector::new(&job.dest_root)
+    /// The connector for a job's destination, with its password and pinned host key. Never fails:
+    /// a destination that cannot be used reports why when the run checks it.
+    pub fn connector_for(&self, job: &Job) -> Box<dyn Nas> {
+        self.open_dest(&job.dest_root)
+    }
+
+    /// Open a destination (mounted path or NAS URL) with what the OS stores for it.
+    pub fn open_dest(&self, dest_root: &str) -> Box<dyn Nas> {
+        match Destination::parse(dest_root) {
+            Ok(d) => backer_connector::open(&d, self.access_for(&d)),
+            Err(_) => backer_connector::open_url(dest_root, Access::default()),
+        }
+    }
+
+    pub fn access_for(&self, d: &Destination) -> Access {
+        Access {
+            secret: d.credential_key().and_then(|k| self.secrets.get(&k)),
+            host_key: d.host_key_id().and_then(|k| self.host_keys.get(&k)),
+        }
     }
 
     pub fn start_job(self: &Arc<Self>, id: JobId) -> Result<Start> {
@@ -129,11 +154,11 @@ impl Agent {
         let work = move || {
             let _awake = platform::AwakeGuard::new();
             if let Ok(store) = me.store() {
-                let conn = Agent::connector_for(&job);
+                let conn = me.connector_for(&job);
                 // FR-18: wait out a NAS that is briefly away. The engine then records the run as usual,
                 // including a failed run if the NAS never came back.
-                let reach = retry::wait_until_reachable(&conn, &me.retry, &cancel);
-                let run = run_job_as(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
+                let reach = retry::wait_until_reachable(&*conn, &me.retry, &cancel);
+                let run = run_job_as(&store, &*conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
                 let _ = store.prune_logs(KEEP_LOG_RUNS);
                 if let Some((title, body)) = failure_notice(&job, &reach, run.as_ref().ok(), &me.retry) {
                     me.notifier.notify(&title, &body);
@@ -217,7 +242,7 @@ impl Agent {
         if self.is_running(id) {
             return Err("This job is backing up right now. Check it again when the backup has finished.".into());
         }
-        let rep = verify_job(&store, &Agent::connector_for(&job), &job, &AtomicBool::new(false)).map_err(es)?;
+        let rep = verify_job(&store, &*self.connector_for(&job), &job, &AtomicBool::new(false)).map_err(es)?;
         serde_json::to_value(rep).map_err(|e| e.to_string())
     }
 
@@ -301,7 +326,7 @@ impl Control for AgentControl {
     fn test_connection(&self, id: JobId) -> std::result::Result<Value, String> {
         let s = self.0.store().map_err(es)?;
         let j = self.0.require_job(&s, id)?;
-        Ok(match Agent::connector_for(&j).check_ready() {
+        Ok(match self.0.connector_for(&j).check_ready() {
             Ok(()) => json!({"ok": true}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
         })
@@ -372,18 +397,20 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
             "save_job" => {
                 let mut job: Job = serde_json::from_value(p.get("job").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
+                Destination::parse(&job.dest_root).map_err(es)?;
                 let id = agent.store().map_err(es)?.save_job(&mut job).map_err(es)?;
                 *agent.new_job_request.lock().unwrap() = None; // the user has set up a job, so any waiting request is done
                 Ok(json!({"job_id": id}))
             }
+            // `path` is a mounted folder or a NAS URL (sftp://, smb://, nfs://).
             "check_destination" => {
                 let root = p.get("path").and_then(Value::as_str).ok_or("path required")?;
-                Ok(json!({"ready": MountedConnector::new(root).check_ready().is_ok()}))
+                Ok(json!({"ready": agent.open_dest(root).check_ready().is_ok()}))
             }
             "init_destination" => {
                 let root = p.get("path").and_then(Value::as_str).ok_or("path required")?;
-                let c = MountedConnector::new(root);
-                if !std::path::Path::new(root).is_dir() { return Err("not a folder".into()); }
+                let c = agent.open_dest(root);
+                c.reachable().map_err(|_| "not a folder".to_string())?;
                 c.init_marker().map_err(es)?;
                 Ok(json!({"ok": true}))
             }
@@ -403,9 +430,10 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "remove_deleted" => {
                 let s = agent.store().map_err(es)?;
                 let j = agent.require_job(&s, need()?)?;
-                let r = backer_removal::remove_reviewed(&s, &Agent::connector_for(&j), j.id, &paths(&p)?).map_err(es)?;
+                let r = backer_removal::remove_reviewed(&s, &*agent.connector_for(&j), j.id, &paths(&p)?).map_err(es)?;
                 Ok(Value::Array(r.into_iter().map(|(path, o)| json!({"path": path, "outcome": format!("{o:?}")})).collect()))
             }
+            m if m.starts_with("nas_") => nas::handle(agent, m, &p),
             _ => Err(format!("unknown method {method}")),
         }
     })();

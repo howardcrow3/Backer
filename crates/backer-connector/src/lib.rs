@@ -1,5 +1,17 @@
 //! Destination access. The `Connector` trait has no delete method on purpose:
 //! only `Eraser` (used by backer-removal) can remove NAS files.
+//!
+//! Protocols: a mounted path ([`MountedConnector`]) and direct SFTP, SMB and NFS connections
+//! ([`open`]), which share the backup rules in [`remote`].
+pub mod dest;
+pub mod hostkeys;
+pub mod nfs;
+pub mod remote;
+pub mod sftp;
+pub mod smb;
+mod srvsvc;
+
+pub use dest::{Destination, Protocol};
 use backer_core::{Error, Result, DEST_MARKER};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -29,7 +41,7 @@ pub struct PutResult {
 }
 
 /// One entry in a folder on the NAS, for browsing a backup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
@@ -60,6 +72,126 @@ pub trait TempCleaner: Connector {
 /// The only way to delete a backed-up file. Only backer-removal may use this.
 pub trait Eraser {
     fn erase(&self, rel: &str) -> Result<()>;
+}
+
+/// What the setup wizard needs before a destination has a marker.
+pub trait Setup {
+    /// Connect, log in and confirm the destination folder exists.
+    fn reachable(&self) -> Result<()>;
+    /// `reachable`, plus write and remove a small temp file.
+    fn check_writable(&self) -> Result<()>;
+    /// Create the marker file. Called once by the wizard after the user confirms the destination.
+    fn init_marker(&self) -> Result<()>;
+    /// Create a folder (and its parents) under the destination.
+    fn create_dir(&self, rel: &str) -> Result<()>;
+}
+
+/// Everything the agent does with a destination, as one object.
+pub trait Nas: TempCleaner + Eraser + Reader + Setup {}
+impl<T: TempCleaner + Eraser + Reader + Setup> Nas for T {}
+
+/// The secret for a destination, from the OS credential store.
+#[derive(Clone)]
+pub enum Secret {
+    Password(String),
+    /// An OpenSSH private key (PEM text) and its passphrase, for SFTP.
+    PrivateKey { pem: String, passphrase: Option<String> },
+}
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Secret::Password(_) => "Secret::Password(..)",
+            Secret::PrivateKey { .. } => "Secret::PrivateKey(..)",
+        })
+    }
+}
+
+/// What opening a network destination needs besides its URL.
+#[derive(Debug, Clone, Default)]
+pub struct Access {
+    pub secret: Option<Secret>,
+    /// SFTP: the host key fingerprint pinned on first connect ("SHA256:..."). `None` refuses to connect.
+    pub host_key: Option<String>,
+}
+
+/// Open any destination. Network connections are made lazily, on first use, so this never touches the
+/// network. A destination that cannot even be set up (a malformed URL) gives a connector whose every
+/// call fails with that reason, so runs record it like any other unreachable NAS.
+pub fn open(dest: &Destination, access: Access) -> Box<dyn Nas> {
+    let r: Result<Box<dyn Nas>> = (|| {
+        Ok(match dest {
+            Destination::Mounted(p) => Box::new(MountedConnector::new(p)) as Box<dyn Nas>,
+            Destination::Sftp { path, .. } => Box::new(remote::RemoteConnector::new(sftp::SftpFs::new(dest.clone(), access)?, path)?),
+            Destination::Smb { path, .. } => Box::new(remote::RemoteConnector::new(smb::SmbFs::new(dest.clone(), access)?, path)?),
+            Destination::Nfs { path, .. } => Box::new(remote::RemoteConnector::new(nfs::NfsFs::new(dest.clone())?, path)?),
+        })
+    })();
+    r.unwrap_or_else(|e| Box::new(Unavailable(e.to_string())))
+}
+
+/// Open the destination stored in `Job::dest_root`.
+pub fn open_url(dest_root: &str, access: Access) -> Box<dyn Nas> {
+    match Destination::parse(dest_root) {
+        Ok(d) => open(&d, access),
+        Err(e) => Box::new(Unavailable(e.to_string())),
+    }
+}
+
+/// A destination that cannot be used; every call says why.
+pub struct Unavailable(pub String);
+impl Unavailable {
+    fn err<T>(&self) -> Result<T> {
+        Err(Error::DestinationNotReady(self.0.clone()))
+    }
+}
+impl Connector for Unavailable {
+    fn check_ready(&self) -> Result<()> {
+        self.err()
+    }
+    fn stat(&self, _: &str) -> Result<Option<RemoteStat>> {
+        self.err()
+    }
+    fn put_file(&self, _: &Path, _: &str, _: i64, _: u64) -> Result<PutResult> {
+        self.err()
+    }
+    fn hash(&self, _: &str) -> Result<String> {
+        self.err()
+    }
+    fn list_temp_files(&self, _: &str) -> Result<Vec<String>> {
+        self.err()
+    }
+}
+impl TempCleaner for Unavailable {
+    fn remove_temp(&self, _: &str) -> Result<()> {
+        self.err()
+    }
+}
+impl Eraser for Unavailable {
+    fn erase(&self, _: &str) -> Result<()> {
+        self.err()
+    }
+}
+impl Reader for Unavailable {
+    fn list_dir(&self, _: &str) -> Result<Vec<DirEntry>> {
+        self.err()
+    }
+    fn read_file(&self, _: &str, _: &mut dyn Write) -> Result<u64> {
+        self.err()
+    }
+}
+impl Setup for Unavailable {
+    fn reachable(&self) -> Result<()> {
+        self.err()
+    }
+    fn check_writable(&self) -> Result<()> {
+        self.err()
+    }
+    fn init_marker(&self) -> Result<()> {
+        self.err()
+    }
+    fn create_dir(&self, _: &str) -> Result<()> {
+        self.err()
+    }
 }
 
 /// Connector for any mounted path (SMB/NFS mounted by the OS, or a local disk for tests).
@@ -283,6 +415,30 @@ impl Eraser for MountedConnector {
     }
 }
 
+impl Setup for MountedConnector {
+    fn reachable(&self) -> Result<()> {
+        if self.root.is_dir() {
+            Ok(())
+        } else {
+            Err(Error::DestinationNotReady(format!("{} is not available", self.root.display())))
+        }
+    }
+    fn check_writable(&self) -> Result<()> {
+        self.reachable()?;
+        let p = self.root.join(".backer-probe.part");
+        fs::write(&p, b"backer write test\n").map_err(|e| Error::Connector(format!("no write permission in {}: {e}", self.root.display())))?;
+        fs::remove_file(&p).map_err(cerr)
+    }
+    fn init_marker(&self) -> Result<()> {
+        self.reachable()?;
+        MountedConnector::init_marker(self)
+    }
+    fn create_dir(&self, rel: &str) -> Result<()> {
+        self.reachable()?;
+        fs::create_dir_all(self.full(rel)?).map_err(cerr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +500,46 @@ mod tests {
         let mut s = vec![];
         assert_eq!(c.read_file("m/b.txt", &mut s).unwrap(), 2);
         assert_eq!(s, b"bb");
+    }
+
+    #[test]
+    fn reader_lists_and_reads() {
+        let (d, c) = setup();
+        let src = tempfile::NamedTempFile::new().unwrap();
+        fs::write(src.path(), b"abc").unwrap();
+        c.put_file(src.path(), "Docs/x.txt", 1, 1).unwrap();
+        fs::write(d.path().join(".backer-1-1.part"), b"x").unwrap();
+        let root: Vec<_> = c.list_dir("").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(root, vec!["Docs".to_string()], "marker and temp files hidden");
+        assert_eq!(c.list_dir("Docs").unwrap()[0].size, 3);
+        assert!(c.list_dir("missing").unwrap().is_empty());
+        let mut out = vec![];
+        assert_eq!(c.read_file("Docs/x.txt", &mut out).unwrap(), 3);
+        assert_eq!(out, b"abc");
+    }
+
+    #[test]
+    fn setup_checks() {
+        let (_d, c) = setup();
+        Setup::check_writable(&c).unwrap();
+        Setup::create_dir(&c, "a/b").unwrap();
+        assert!(c.list_dir("a").unwrap()[0].is_dir);
+        let gone = MountedConnector::new("/definitely/not/here");
+        assert!(Setup::reachable(&gone).is_err());
+        assert!(Setup::init_marker(&gone).is_err());
+    }
+
+    #[test]
+    fn open_parses_destinations() {
+        let d = tempfile::tempdir().unwrap();
+        let c = open_url(&d.path().to_string_lossy(), Access::default());
+        c.init_marker().unwrap();
+        c.check_ready().unwrap();
+        // Network connections are lazy: opening needs no server.
+        let _ = open_url("sftp://u@127.0.0.1:1/x", Access::default());
+        // A malformed address fails at check_ready, like an unreachable NAS.
+        let bad = open_url("sftp://nobody-here/x", Access::default());
+        assert!(matches!(bad.check_ready(), Err(Error::DestinationNotReady(m)) if m.contains("user name")));
     }
 
     #[test]

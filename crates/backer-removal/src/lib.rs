@@ -14,7 +14,7 @@ pub enum Outcome {
 
 /// Remove the given files from the NAS. Each path must currently be on the deleted-files review list.
 /// The user's confirmation happens in the app before this is called.
-pub fn remove_reviewed<C: Connector + Eraser>(store: &Store, conn: &C, job: JobId, dest_paths: &[String]) -> Result<Vec<(String, Outcome)>> {
+pub fn remove_reviewed<C: Connector + Eraser + ?Sized>(store: &Store, conn: &C, job: JobId, dest_paths: &[String]) -> Result<Vec<(String, Outcome)>> {
     conn.check_ready()?;
     let mut out = vec![];
     for p in dest_paths {
