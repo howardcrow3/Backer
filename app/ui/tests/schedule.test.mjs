@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const src = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+// Normalise line endings: Windows checkouts may have CRLF.
+const src = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const grab = name => {
   const start = src.indexOf(`const ${name} =`);
   assert.ok(start >= 0, `${name} not found in app.js`);
