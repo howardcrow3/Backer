@@ -32,11 +32,20 @@ pub struct FolderPair {
 pub enum Schedule {
     /// Only when the user clicks Run now.
     Manual,
+    /// Every N minutes (5 to 1440), measured from the last run's start.
+    EveryMinutes { minutes: u32 },
     EveryHours { hours: u32 },
     /// Local wall-clock time, every day.
     Daily { hour: u8, minute: u8 },
     /// Local wall-clock time on the given weekdays (1 = Monday .. 7 = Sunday).
     Weekly { days: Vec<u8>, hour: u8, minute: u8 },
+    /// Local wall-clock time on one day of each month (1..=31). In shorter months it runs on the last day.
+    Monthly { day: u8, hour: u8, minute: u8 },
+}
+
+impl Schedule {
+    pub const MIN_EVERY_MINUTES: u32 = 5;
+    pub const MAX_EVERY_MINUTES: u32 = 1440;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,10 +87,19 @@ impl Job {
                 }
             }
         }
-        if let Schedule::Daily { hour, minute } | Schedule::Weekly { hour, minute, .. } = &self.schedule {
+        if let Schedule::Daily { hour, minute } | Schedule::Weekly { hour, minute, .. } | Schedule::Monthly { hour, minute, .. } = &self.schedule {
             if *hour > 23 || *minute > 59 {
                 return Err(Error::Invalid("bad time".into()));
             }
+        }
+        match &self.schedule {
+            Schedule::EveryMinutes { minutes } if !(Schedule::MIN_EVERY_MINUTES..=Schedule::MAX_EVERY_MINUTES).contains(minutes) => {
+                return Err(Error::Invalid(format!("minutes must be {}-{}", Schedule::MIN_EVERY_MINUTES, Schedule::MAX_EVERY_MINUTES)));
+            }
+            Schedule::Monthly { day, .. } if !(1..=31).contains(day) => {
+                return Err(Error::Invalid("day must be 1-31".into()));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -266,5 +284,21 @@ mod tests {
         assert!(job(abs, r"mac\Docs").validate().is_err());
         assert!(job(abs, "../Docs").validate().is_err());
         assert!(job("relative/path", "mac/Docs").validate().is_err());
+    }
+
+    #[test]
+    fn minutes_and_monthly_ranges() {
+        let abs = if cfg!(windows) { r"C:\Users\h\Docs" } else { "/Users/h/Docs" };
+        let with = |s: Schedule| { let mut j = job(abs, "mac/Docs"); j.schedule = s; j.validate() };
+        assert!(with(Schedule::EveryMinutes { minutes: 15 }).is_ok());
+        assert!(with(Schedule::EveryMinutes { minutes: 4 }).is_err());
+        assert!(with(Schedule::EveryMinutes { minutes: 1441 }).is_err());
+        assert!(with(Schedule::Monthly { day: 31, hour: 2, minute: 0 }).is_ok());
+        assert!(with(Schedule::Monthly { day: 0, hour: 2, minute: 0 }).is_err());
+        assert!(with(Schedule::Monthly { day: 32, hour: 2, minute: 0 }).is_err());
+        assert!(with(Schedule::Monthly { day: 1, hour: 24, minute: 0 }).is_err());
+        // Serde shape the UI and MCP rely on.
+        assert_eq!(serde_json::to_string(&Schedule::EveryMinutes { minutes: 15 }).unwrap(), r#"{"kind":"every_minutes","minutes":15}"#);
+        assert_eq!(serde_json::to_string(&Schedule::Monthly { day: 1, hour: 2, minute: 30 }).unwrap(), r#"{"kind":"monthly","day":1,"hour":2,"minute":30}"#);
     }
 }

@@ -28,9 +28,15 @@ jobs:
           grep -E "FAILED|panicked|^error" out.txt | head -25 | while IFS= read -r l; do echo "::error::${l//%/%25}"; done
           exit $code
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: UI unit tests
+        shell: bash
+        run: node --test app/ui/tests/*.test.mjs
       - run: ./scripts/check-crate-graph.sh
         shell: bash
   dmg:
+    needs: test   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-15
     steps:
@@ -135,6 +141,7 @@ jobs:
           path: out/*
 
   windows:
+    needs: test
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
     runs-on: windows-latest
     steps:
