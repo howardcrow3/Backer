@@ -3,7 +3,9 @@ pub mod approvals;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
+pub mod notify;
 pub mod restore;
+pub mod retry;
 pub mod server;
 pub mod platform;
 
@@ -49,6 +51,9 @@ pub struct Agent {
     new_job_request: Mutex<Option<String>>,
     pub licensing: licensing::Licensing,
     restores: restore::Restores,
+    /// FR-18: how long to wait for an unreachable NAS before a run is marked failed.
+    retry: retry::RetryPolicy,
+    notifier: Arc<dyn notify::Notifier>,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -59,15 +64,20 @@ impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), retry: retry::RetryPolicy::default(), notifier: Arc::new(notify::SystemNotifier), restores: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
+    /// Test agent: runs synchronously, retries without waiting, shows no notifications.
     #[doc(hidden)]
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
+        Self::new_sync_with(db_path, tz, retry::RetryPolicy { retries: 3, delay: std::time::Duration::ZERO }, Arc::new(notify::NullNotifier))
+    }
+    #[doc(hidden)]
+    pub fn new_sync_with(db_path: PathBuf, tz: TimeZone, retry: retry::RetryPolicy, notifier: Arc<dyn notify::Notifier>) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), retry, notifier, restores: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -120,8 +130,14 @@ impl Agent {
             let _awake = platform::AwakeGuard::new();
             if let Ok(store) = me.store() {
                 let conn = Agent::connector_for(&job);
-                let _ = run_job_as(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
+                // FR-18: wait out a NAS that is briefly away. The engine then records the run as usual,
+                // including a failed run if the NAS never came back.
+                let reach = retry::wait_until_reachable(&conn, &me.retry, &cancel);
+                let run = run_job_as(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
                 let _ = store.prune_logs(KEEP_LOG_RUNS);
+                if let Some((title, body)) = failure_notice(&job, &reach, run.as_ref().ok(), &me.retry) {
+                    me.notifier.notify(&title, &body);
+                }
             }
             let next = {
                 let mut st = me.state.lock().unwrap();
@@ -229,6 +245,28 @@ impl Agent {
     pub(crate) fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
+}
+
+/// Spec 8.3: a failed run raises a notification by default. A run the user stopped does not.
+fn failure_notice(job: &Job, reach: &retry::Reach, run: Option<&RunSummary>, policy: &retry::RetryPolicy) -> Option<(String, String)> {
+    if matches!(reach, retry::Reach::Cancelled) {
+        return None;
+    }
+    let run = run?;
+    if run.status != RunStatus::Failed {
+        return None;
+    }
+    let title = format!("Backup of \"{}\" failed", job.name);
+    let body = match reach {
+        retry::Reach::Unreachable { .. } if policy.retries > 0 => format!(
+            "Backer could not reach the NAS, even after trying {} more times over {}. It will try again at the next scheduled backup.",
+            policy.retries,
+            retry::describe(policy.total_wait())
+        ),
+        retry::Reach::Unreachable { .. } => "Backer could not reach the NAS. It will try again at the next scheduled backup.".to_string(),
+        _ => run.message.clone().unwrap_or_else(|| "Open Backer to see what went wrong.".into()),
+    };
+    Some((title, body))
 }
 
 pub(crate) fn es(e: Error) -> String {
@@ -578,6 +616,29 @@ mod tests {
         AgentControl(t.agent.clone()).resume_job(t.id).unwrap();
         assert_eq!(t.agent.tick(at).unwrap(), vec![t.id]);
         assert_eq!(s.list_runs(t.id, 5).unwrap().len(), 1);
+    }
+
+    fn summary(status: RunStatus, message: Option<&str>) -> RunSummary {
+        RunSummary { id: 1, job_id: 1, started: 0, finished: Some(1), status, stats: RunStats::default(), message: message.map(String::from) }
+    }
+
+    #[test]
+    fn failure_notice_explains_an_unreachable_nas_and_skips_other_outcomes() {
+        let t = setup();
+        let job = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
+        let p = retry::RetryPolicy::default();
+        let away = retry::Reach::Unreachable { error: "gone".into() };
+        let (title, body) = failure_notice(&job, &away, Some(&summary(RunStatus::Failed, Some("gone"))), &p).unwrap();
+        assert_eq!(title, "Backup of \"j\" failed");
+        assert!(body.contains("3 more times over 15 minutes") && body.contains("next scheduled backup"), "{body}");
+        // Other failures pass on the engine's message.
+        let ready = retry::Reach::Ready { retries_used: 0 };
+        let (_, body) = failure_notice(&job, &ready, Some(&summary(RunStatus::Failed, Some("source not available: /x"))), &p).unwrap();
+        assert_eq!(body, "source not available: /x");
+        // Success, warnings and a stopped job raise nothing.
+        assert!(failure_notice(&job, &ready, Some(&summary(RunStatus::Ok, None)), &p).is_none());
+        assert!(failure_notice(&job, &ready, Some(&summary(RunStatus::Warnings, None)), &p).is_none());
+        assert!(failure_notice(&job, &retry::Reach::Cancelled, Some(&summary(RunStatus::Failed, None)), &p).is_none());
     }
 
     #[test]

@@ -137,8 +137,8 @@ jobs:
           path: out/*
 
   windows:
-    needs: test
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
