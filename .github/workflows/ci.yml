@@ -32,6 +32,7 @@ jobs:
         shell: bash
   dmg:
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
+    needs: test   # the app is only built after unit and integration tests pass
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -136,6 +137,7 @@ jobs:
 
   windows:
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
+    needs: test   # the app is only built after unit and integration tests pass
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

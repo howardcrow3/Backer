@@ -1,6 +1,9 @@
 //! Shared types. No I/O, no dependencies on other backer crates.
 use serde::{Deserialize, Serialize};
 
+pub mod exclude;
+pub use exclude::ExcludeSet;
+
 pub type JobId = i64;
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +52,9 @@ pub struct Job {
     pub schedule: Schedule,
     pub paused: bool,
     pub catch_up: bool,
+    /// Exclude patterns such as `*.tmp` or `node_modules/` (see [`exclude`]). The field keeps its old name so
+    /// saved jobs load unchanged; an exact name is a valid pattern.
+    #[serde(default)]
     pub exclude_names: Vec<String>,
     /// Files larger than this are skipped with a warning. None = no limit.
     pub max_file_bytes: Option<u64>,
@@ -83,6 +89,7 @@ impl Job {
                 return Err(Error::Invalid("bad time".into()));
             }
         }
+        ExcludeSet::new(&self.exclude_names)?;
         Ok(())
     }
 }
@@ -266,5 +273,19 @@ mod tests {
         assert!(job(abs, r"mac\Docs").validate().is_err());
         assert!(job(abs, "../Docs").validate().is_err());
         assert!(job("relative/path", "mac/Docs").validate().is_err());
+    }
+    #[test]
+    fn invalid_exclude_pattern_fails_validation() {
+        let abs = if cfg!(windows) { r"C:\Users\h\Docs" } else { "/Users/h/Docs" };
+        let mut j = job(abs, "mac/Docs");
+        j.exclude_names = vec!["*.tmp".into(), "node_modules/".into()];
+        assert!(j.validate().is_ok());
+        j.exclude_names.push("[oops".into());
+        assert!(j.validate().unwrap_err().to_string().contains("[oops"));
+    }
+    #[test]
+    fn jobs_saved_without_excludes_still_load() {
+        let j: Job = serde_json::from_str(r#"{"id":1,"name":"j","folders":[],"dest_root":"x","schedule":{"kind":"manual"},"paused":false,"catch_up":true,"max_file_bytes":null}"#).unwrap();
+        assert!(j.exclude_names.is_empty());
     }
 }

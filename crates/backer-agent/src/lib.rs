@@ -572,4 +572,28 @@ mod tests {
         assert_eq!(j.schedule, Schedule::Manual);
         assert_eq!(j.dest_root, t.dst.to_string_lossy());
     }
+    #[test]
+    fn editing_exclude_patterns_in_the_app_applies_to_the_next_run() {
+        let t = setup();
+        fs::write(t.src.join("a.txt"), b"1").unwrap();
+        fs::write(t.src.join("b.tmp"), b"2").unwrap();
+        fs::create_dir_all(t.src.join("node_modules")).unwrap();
+        fs::write(t.src.join("node_modules/x.js"), b"3").unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&t.agent, &json!({"method": m, "params": p}));
+        let mut job = ui("get_job", json!({"job_id": t.id}))["result"]["job"].clone();
+        // A broken pattern is refused with the pattern named, and the saved job is unchanged.
+        job["exclude_names"] = json!(["*.tmp", "[oops"]);
+        let r = ui("save_job", json!({"job": job}));
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("[oops"), "{r}");
+        assert!(ui("get_job", json!({"job_id": t.id}))["result"]["job"]["exclude_names"].as_array().unwrap().is_empty());
+        job["exclude_names"] = json!(["*.tmp", "node_modules/"]);
+        assert_eq!(ui("save_job", json!({"job": job}))["result"]["job_id"], t.id);
+        assert_eq!(ui("get_job", json!({"job_id": t.id}))["result"]["job"]["exclude_names"], json!(["*.tmp", "node_modules/"]));
+        t.agent.start_job(t.id).unwrap();
+        assert!(t.dst.join("mac/src/a.txt").exists());
+        assert!(!t.dst.join("mac/src/b.tmp").exists() && !t.dst.join("mac/src/node_modules").exists());
+        let v = ui("verify_job", json!({"job_id": t.id}))["result"].clone();
+        assert_eq!((v["checked"].as_u64(), v["excluded"].as_u64()), (Some(1), Some(2)));
+    }
 }
