@@ -132,7 +132,7 @@ impl SftpFs {
         let auth = match &self.access.secret {
             None => return Err(Error::Credentials(format!("no password is saved for {}@{}", self.user, self.host))),
             Some(Secret::Password(p)) => sess.userauth_password(&self.user, p),
-            Some(Secret::PrivateKey { pem, passphrase }) => sess.userauth_pubkey_memory(&self.user, None, pem, passphrase.as_deref()),
+            Some(Secret::PrivateKey { pem, passphrase }) => key_login(&sess, &self.user, pem, passphrase.as_deref())?,
         };
         if let Err(e) = auth {
             if is_transport(&e) && !matches!(e.code(), ErrorCode::Session(-18) | ErrorCode::Session(-19)) {
@@ -322,6 +322,19 @@ impl RemoteFs for SftpFs {
     fn describe(&self) -> String {
         format!("sftp://{}", self.host)
     }
+}
+
+
+/// Log in with a private key held in memory. libssh2 offers this only with OpenSSL (macOS, Linux);
+/// on Windows it uses WinCNG, which cannot, and the key is never written to disk to work around it.
+#[cfg(unix)]
+fn key_login(sess: &ssh2::Session, user: &str, pem: &str, passphrase: Option<&str>) -> Result<std::result::Result<(), ssh2::Error>> {
+    Ok(sess.userauth_pubkey_memory(user, None, pem, passphrase))
+}
+
+#[cfg(not(unix))]
+fn key_login(_: &ssh2::Session, _: &str, _: &str, _: Option<&str>) -> Result<std::result::Result<(), ssh2::Error>> {
+    Err(Error::Credentials("SSH key login is not available on Windows yet; save a password for this NAS instead".into()))
 }
 
 #[cfg(test)]
