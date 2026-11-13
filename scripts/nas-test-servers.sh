@@ -6,7 +6,8 @@
 #   cargo test -p backer-connector --test protocols
 #   scripts/nas-test-servers.sh down
 #
-# NFS needs a Linux host whose kernel has nfsd (GitHub's ubuntu runners do); it is skipped elsewhere.
+# NFS needs a Linux host whose kernel has the nfs and nfsd modules (GitHub's ubuntu runners do); it is
+# skipped elsewhere, except in CI, where a server that does not start is an error.
 set -euo pipefail
 PASS="backer-test-pw"
 SFTP_PORT=2222
@@ -40,7 +41,7 @@ share:
     writelist: backer
 YML
   docker run -d --name backer-smb -p 127.0.0.1:$SMB_PORT:445 -v "$cfg:/data" -v "$cfg/data:/samba/backups" crazymax/samba:4.23.8 >/dev/null
-  if [ "$(uname -s)" = "Linux" ] && { lsmod 2>/dev/null | grep -q '^nfsd' || sudo -n modprobe nfsd 2>/dev/null; }; then
+  if [ "$(uname -s)" = "Linux" ] && have_mod nfs && have_mod nfsd; then
     mkdir -p "${RUNNER_TEMP:-/tmp}/backer-nfs"
     chmod 777 "${RUNNER_TEMP:-/tmp}/backer-nfs"
     docker run -d --name backer-nfs --privileged -p 127.0.0.1:2049:2049 -p 127.0.0.1:111:111 -p 127.0.0.1:32767:32767 -p 127.0.0.1:32765:32765 \
@@ -51,7 +52,12 @@ YML
     NFS=1
   fi
   wait_port $SFTP_PORT; wait_port $SMB_PORT
-  [ -n "${NFS:-}" ] && wait_port 2049
+  # Docker holds the published port open even if the server inside exits, so wait for its own "ready" line.
+  if [ -n "${NFS:-}" ] && ! wait_nfs; then
+    docker logs backer-nfs >&2 || true
+    [ -n "${CI:-}" ] && { echo "the NFS test server did not start" >&2; return 1; }
+    NFS=
+  fi
   # Samba and sshd accept connections a moment before they are ready to log in.
   sleep 3
   echo "export BACKER_TEST_SFTP='sftp://backer@127.0.0.1:$SFTP_PORT/upload'"
@@ -68,6 +74,17 @@ wait_port() {
     sleep 1
   done
   echo "port $1 never opened" >&2; docker logs backer-sftp >&2 || true; docker logs backer-smb >&2 || true; return 1
+}
+
+have_mod() { lsmod 2>/dev/null | grep -q "^$1 " || sudo -n modprobe "$1" 2>/dev/null; }
+
+wait_nfs() {
+  for _ in $(seq 1 60); do
+    docker logs backer-nfs 2>&1 | grep -q "READY AND WAITING FOR NFS CLIENT CONNECTIONS" && return 0
+    [ "$(docker inspect -f '{{.State.Running}}' backer-nfs 2>/dev/null)" = "true" ] || return 1
+    sleep 1
+  done
+  return 1
 }
 
 down() { docker rm -f backer-sftp backer-smb backer-nfs >/dev/null 2>&1 || true; }
