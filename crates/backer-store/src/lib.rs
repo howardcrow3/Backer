@@ -232,6 +232,14 @@ impl Store {
         self.conn.execute("DELETE FROM deleted WHERE job_id=?1 AND dest_path=?2", params![job, dest_path]).map_err(se)?;
         Ok(())
     }
+    /// Marks every file recorded under the folder `dest_dir` as seen, e.g. a folder the user now excludes,
+    /// so its files already on the NAS are left alone instead of being listed as deleted.
+    pub fn mark_seen_under(&self, job: JobId, dest_dir: &str, run: i64) -> Result<()> {
+        let like = format!("{}/%", escape_like(dest_dir));
+        self.conn.execute("UPDATE files SET seen_run=?3 WHERE job_id=?1 AND dest_path LIKE ?2 ESCAPE '\\'", params![job, like, run]).map_err(se)?;
+        self.conn.execute("DELETE FROM deleted WHERE job_id=?1 AND dest_path LIKE ?2 ESCAPE '\\'", params![job, like]).map_err(se)?;
+        Ok(())
+    }
     /// After a complete scan of `dest_prefix`, files not seen this run move to the review list.
     /// Never touches the NAS. Files the user chose to keep are not listed again.
     /// Flags files that were on the source last time but not this run. Returns the NAS paths newly flagged.

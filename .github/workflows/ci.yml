@@ -38,8 +38,6 @@ jobs:
   dmg:
     needs: test   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
-    # Only built once the unit and integration tests pass on every platform.
-    needs: test
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -145,7 +143,6 @@ jobs:
   windows:
     needs: test
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
-    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

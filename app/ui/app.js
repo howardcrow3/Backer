@@ -17,6 +17,10 @@ const hhmm = s => `${String(s.hour).padStart(2, '0')}:${String(s.minute).padStar
 const ordinal = n => n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
 const monthDayText = d => d >= 29 ? `${ordinal(d)} (or the last day)` : ordinal(d);
 const schedText = s => ({ manual: () => 'Run now only', every_minutes: () => `Every ${s.minutes} min`, every_hours: () => `Every ${s.hours} h`, daily: () => `Daily at ${hhmm(s)}`, weekly: () => `Weekly at ${hhmm(s)}`, monthly: () => `Monthly on the ${monthDayText(s.day)} at ${hhmm(s)}` }[s.kind] || (() => s.kind))();
+// Exclude patterns are edited one per line. Blank lines are dropped; the agent checks the syntax when the job is saved.
+const parsePatterns = t => String(t || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+const EXCLUDE_HELP = 'One pattern per line. <span class="mono">*.tmp</span> leaves out matching files anywhere, <span class="mono">node_modules/</span> leaves out every folder with that name and everything in it, and <span class="mono">/build</span> only the one at the top of each backed-up folder. <span class="mono">*</span> stays within a folder, <span class="mono">**</span> crosses folders. Case does not matter. Files already on the NAS are left there.';
+const excludeEditor = (val) => `<label>Leave out files and folders matching</label><textarea id="excl" class="mono" rows="5" style="width:100%" placeholder="*.tmp&#10;node_modules/" spellcheck="false">${esc(val)}</textarea><div class="sub">${EXCLUDE_HELP}</div>`;
 
 function toast(msg, bad) {
   let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
@@ -163,6 +167,7 @@ async function renderDetail(id) {
   $('#main').innerHTML = `<div class="sub"><a href="#" data-back>Jobs</a> / ${esc(j.job.name)}</div>
     <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button data-verify="${id}">Verify backup</button><button data-browse="${id}">Browse and restore</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
+    <div class="card"><div class="row"><div class="sub" style="flex:1">Left out</div><button class="link" data-excl="${id}">Edit…</button></div>${(j.job.exclude_names || []).length ? `<div class="mono">${j.job.exclude_names.map(esc).join(' · ')}</div>` : '<div class="dim">Nothing besides system files such as .DS_Store and Thumbs.db.</div>'}</div>
     ${last ? `<div class="card strip"><div><div class="lbl">Last backup</div><div class="big">${fmtTime(last.started)}</div><div>${resultPill(last)}</div></div><div><div class="lbl">Last ${Math.min(15, runs.length)} runs · taller means more copied</div>${sparkline(runs)}</div></div>` : ''}
     <div class="row" style="margin-top:24px"><h2 style="flex:1;margin:0">Run history</h2><span class="chips"><button class="chip ${histFilter === 'all' ? 'on' : ''}" data-hist="all">All</button><button class="chip ${histFilter === 'attention' ? 'on' : ''}" data-hist="attention">Needs attention</button></span></div>
     ${rr ? `<table class="hist" style="margin-top:8px"><thead><tr><th>Started</th><th class="num">Duration</th><th class="num">Copied</th><th class="num">Size</th><th>Result</th><th></th></tr></thead><tbody>${rr}</tbody></table>` : `<div class="card">${runs.length ? 'No runs needed attention.' : 'No runs yet.'}</div>`}
@@ -217,7 +222,7 @@ async function renderRun(id) {
     tile('Unchanged', dash(fmtN(s.unchanged))),
     tile('Skipped', dash(fmtN(s.skipped)), s.skipped ? 'not copied' : '', s.skipped ? 'wn' : ''),
     s.errors ? tile('Errors', fmtN(s.errors), 'stopped the run', 'er') : tile('Warnings', dash(fmtN(s.warnings)), s.warnings ? 'couldn’t be read' : '', s.warnings ? 'wn' : ''),
-    tile('Excluded', dash(fmtN(s.excluded)), s.excluded ? 'left out by name' : ''),
+    tile('Excluded', dash(fmtN(s.excluded)), s.excluded ? 'left out by exclude rules' : ''),
     tile('Data sent', s.bytes ? fmtBytes(s.bytes) : '—', s.bytes && sec >= 1 ? `${fmtBytes(s.bytes / sec)}/s average` : '')
   ].join('');
   const flagged = s.newly_deleted ? `<div class="issue flat"><span class="ic info">i</span><span class="grow"><b>${fmtN(s.newly_deleted)} file${s.newly_deleted === 1 ? '' : 's'} flagged as deleted on this computer</b><span class="lbl block">Still on your NAS. Backer won’t remove them unless you say so.</span></span><button data-go="deleted">Review…</button></div>` : '';
@@ -405,7 +410,7 @@ function verifyHtml(r, id) {
   const problems = r.missing_total + r.wrong_size_total + r.unreadable_total + r.folders_unavailable.length;
   const head = r.cancelled ? 'The check was stopped' : problems ? 'Some files are not on your NAS' : r.changed_total ? 'Everything is backed up, some files have changed since' : 'Every file is on your NAS';
   const sec = (title, note, items, total) => total ? `<h2 style="font-size:14px;margin:14px 0 4px">${fmtN(total)} ${title}</h2><div class="sub">${note}</div>${list(items, total)}` : '';
-  const left = [r.links && `${fmtN(r.links)} shortcut${r.links === 1 ? '' : 's'}`, r.too_large && `${fmtN(r.too_large)} over the size limit`, r.excluded && `${fmtN(r.excluded)} left out by name`].filter(Boolean);
+  const left = [r.links && `${fmtN(r.links)} shortcut${r.links === 1 ? '' : 's'}`, r.too_large && `${fmtN(r.too_large)} over the size limit`, r.excluded && `${fmtN(r.excluded)} left out by exclude rules`].filter(Boolean);
   return `<h1 style="font-size:18px">${head}</h1>
     <p>${fmtN(r.ok)} of ${fmtN(r.checked)} files checked are on the NAS with the right size.</p>
     ${r.folders_unavailable.length ? `<div class="banner">Not available, so not checked: ${r.folders_unavailable.map(esc).join(', ')}</div>` : ''}
@@ -428,7 +433,7 @@ const wizardSchedule = w => ({
   monthly: { kind: 'monthly', day: w.mday, hour: w.hour, minute: w.minute },
 }[w.sched]);
 function wizard(suggested = '') {
-  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '' };
+  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '', excludes: '' };
   const destOf = f => w.dest_base ? `${w.dest_base}/${base(f)}` : base(f);
   let step = 0; const names = ['Folders', 'NAS', 'Schedule', 'Options', 'Review'];
   const d = $('#dlg'); let error = '';
@@ -443,7 +448,7 @@ function wizard(suggested = '') {
         ${['daily', 'weekly', 'monthly'].includes(w.sched) ? `<label>Time</label><input id="time" type="time" value="${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}">` : ''}
         ${w.sched === 'weekly' ? `<label>Days</label><div class="row">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((n, i) => `<label style="margin:0"><input type="checkbox" style="width:auto;height:auto" data-day="${i + 1}" ${w.days.includes(i + 1) ? 'checked' : ''}> ${n}</label>`).join('')}</div>` : ''}
         <label style="margin-top:12px"><input id="catch" type="checkbox" style="width:auto;height:auto" ${w.catch_up ? 'checked' : ''}> Run at the next opportunity if the Mac was asleep</label>`,
-      `<h1>A few options</h1><label>Skip files larger than (GB, blank for no limit)</label><input id="max" type="number" min="1" value="${esc(w.max_gb)}"><div class="card">Files you delete on this Mac stay on the NAS. The app lists them and nothing is removed until you confirm.</div>`,
+      `<h1>A few options</h1><label>Skip files larger than (GB, blank for no limit)</label><input id="max" type="number" min="1" value="${esc(w.max_gb)}">${excludeEditor(w.excludes)}<div class="card">Files you delete on this Mac stay on the NAS. The app lists them and nothing is removed until you confirm.</div>`,
       `<h1>Ready to start</h1><label>Name</label><input id="name" value="${esc(w.name || w.folders.map(f => base(f)).join(', '))}"><div class="card">${w.folders.map(f => `<div class="mono">${esc(f)} → ${esc(destOf(f))}</div>`).join('')}<div class="sub" style="margin-top:6px">Destination: ${esc(w.dest_root)} · ${schedText(wizardSchedule(w))}</div></div><label><input id="first" type="checkbox" style="width:auto;height:auto" checked> Start the first backup now</label>`,
     ][step];
     d.innerHTML = `<div class="steps">${names.map((n, i) => i === step ? `<b>${i + 1} ${n}</b>` : `<span>${i + 1} ${n}</span>`).join('<span>›</span>')}</div>${body}<div class="err">${esc(error)}</div>
@@ -466,6 +471,7 @@ function wizard(suggested = '') {
     if (d.querySelector('[data-day]')) w.days = [...d.querySelectorAll('[data-day]:checked')].map(c => +c.dataset.day);
     if (v('catch')) w.catch_up = v('catch').checked;
     if (v('max')) w.max_gb = v('max').value;
+    if (v('excl')) w.excludes = v('excl').value;
     if (v('name')) w.name = v('name').value;
   }
   async function next() {
@@ -480,7 +486,7 @@ function wizard(suggested = '') {
     if (error) return draw();
     if (step < 4) { step++; return draw(); }
     const schedule = wizardSchedule(w);
-    const job = { id: 0, name: w.name || 'Backup', dest_root: w.dest_root, schedule, paused: false, catch_up: w.catch_up, exclude_names: [], max_file_bytes: w.max_gb ? Math.round(+w.max_gb * 1e9) : null,
+    const job = { id: 0, name: w.name || 'Backup', dest_root: w.dest_root, schedule, paused: false, catch_up: w.catch_up, exclude_names: parsePatterns(w.excludes), max_file_bytes: w.max_gb ? Math.round(+w.max_gb * 1e9) : null,
       folders: w.folders.map(f => ({ source: f, dest: destOf(f) })) };
     try { const r = await call('save_job', { job }); if ($('#first', d).checked) await call('run_job', { job_id: r.job_id }); d.close(); render(); } catch (e) { error = String(e); draw(); }
   }
@@ -488,7 +494,7 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate],[data-browse]'); if (!t) return;
+  const t = e.target.closest('[data-excl],[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate],[data-browse]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
@@ -513,6 +519,23 @@ document.addEventListener('click', async e => {
       try { await call('delete_job', { job_id: id }); d.close(); view = 'jobs'; detailId = null; render(); toast('Job deleted. Files on the NAS were left alone.'); }
       catch (e) { d.close(); toast('Could not delete the job: ' + (e && e.message || e), true); }
     };
+  }
+  else if (ds.excl) {
+    // Edit this job's exclude patterns. The whole job is saved back so nothing else about it changes.
+    const d = $('#dlg'), id = +ds.excl;
+    const { job } = await call('get_job', { job_id: id });
+    const draw = (text, err = '') => {
+      d.innerHTML = `<h1 style="font-size:18px">What to leave out of “${esc(job.name)}”</h1>${excludeEditor(text)}<div class="err">${esc(err)}</div>
+        <div class="row" style="justify-content:flex-end;margin-top:12px"><button id="c">Cancel</button><button class="pri" id="go">Save</button></div>`;
+      $('#c', d).onclick = () => d.close();
+      $('#go', d).onclick = async () => {
+        const text = $('#excl', d).value;
+        try { await call('save_job', { job: { ...job, exclude_names: parsePatterns(text) } }); d.close(); toast('Saved. The next backup uses these rules.'); render(); }
+        catch (err) { draw(text, String((err && err.message) || err).replace(/^invalid: /, '')); }
+      };
+    };
+    draw((job.exclude_names || []).join('\n')); d.showModal();
+    return;
   }
   else if (ds.verify) {
     const id = +ds.verify, d = $('#dlg');
