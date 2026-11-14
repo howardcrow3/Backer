@@ -27,8 +27,29 @@ fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
-fn excluded(job: &Job, name: &str) -> bool {
-    DEFAULT_EXCLUDES.contains(&name) || job.exclude_names.iter().any(|e| e == name)
+/// What a walk leaves out: the built-in junk names plus the job's own patterns, compiled once per run.
+struct Excludes<'a> {
+    root: &'a Path,
+    set: ExcludeSet,
+}
+
+impl<'a> Excludes<'a> {
+    fn new(job: &Job, root: &'a Path) -> Result<Self> {
+        Ok(Self { root, set: ExcludeSet::new(&job.exclude_names)? })
+    }
+    /// Path from the top of the source folder with `/` separators, for an entry below it.
+    fn rel(&self, e: &walkdir::DirEntry) -> String {
+        e.path().strip_prefix(self.root).map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")).unwrap_or_default()
+    }
+    fn skips(&self, e: &walkdir::DirEntry) -> bool {
+        if e.depth() == 0 {
+            return false;
+        }
+        if DEFAULT_EXCLUDES.contains(&&*e.file_name().to_string_lossy()) {
+            return true;
+        }
+        !self.set.is_empty() && self.set.is_excluded(&self.rel(e), e.file_type().is_dir())
+    }
 }
 
 /// Short, path-free reason for a file-system error, so identical problems group together in the run report.
@@ -139,11 +160,15 @@ pub fn run_job_as(
         }
         let mut scan_complete = true;
         let mut fatal = false;
+        let ex = Excludes::new(job, root)?;
         let excluded_here = std::cell::Cell::new(0u64);
+        // Excluded entries already backed up stay on the NAS; remember them so they are not flagged as deleted.
+        let excluded_paths = std::cell::RefCell::new(Vec::<(String, bool)>::new());
         let walker = WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
-            let skip = e.depth() > 0 && excluded(job, &e.file_name().to_string_lossy());
+            let skip = ex.skips(e);
             if skip {
                 excluded_here.set(excluded_here.get() + 1);
+                excluded_paths.borrow_mut().push((format!("{}/{}", pair.dest, nfc(&ex.rel(e))), e.file_type().is_dir()));
             }
             !skip
         });
@@ -261,6 +286,13 @@ pub fn run_job_as(
             }
         }
         stats.excluded += excluded_here.get();
+        for (p, is_dir) in excluded_paths.take() {
+            if is_dir {
+                store.mark_seen_under(job.id, &p, run)?;
+            } else {
+                store.mark_seen(job.id, &p, run)?;
+            }
+        }
         if cancelled || fatal {
             fs.duration_ms = folder_started.elapsed().as_millis() as u64;
             store.save_folder_stat(run, &fs)?;
@@ -352,9 +384,10 @@ pub fn verify_job(store: &Store, conn: &dyn Connector, job: &Job, cancel: &Atomi
             rep.folders_unavailable.push(pair.source.clone());
             continue;
         }
+        let ex = Excludes::new(job, root)?;
         let excluded_here = std::cell::Cell::new(0u64);
         let walker = WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
-            let skip = e.depth() > 0 && excluded(job, &e.file_name().to_string_lossy());
+            let skip = ex.skips(e);
             if skip {
                 excluded_here.set(excluded_here.get() + 1);
             }
@@ -599,6 +632,68 @@ mod tests {
             assert_eq!(rows.first().unwrap().kind, "run");
             assert_eq!(rows.last().unwrap().kind, "run");
         }
+    }
+
+    fn with_excludes(mut e: Env, pats: &[&str]) -> Env {
+        e.job.exclude_names = pats.iter().map(|p| p.to_string()).collect();
+        e.store.save_job(&mut e.job).unwrap();
+        e
+    }
+
+    #[test]
+    fn exclude_patterns_skip_matching_files_and_folders() {
+        let e = with_excludes(env(), &["*.tmp", "node_modules/", "/build"]);
+        fs::write(e.src.join("keep.txt"), b"k").unwrap();
+        fs::write(e.src.join("scratch.TMP"), b"t").unwrap();
+        fs::create_dir_all(e.src.join("web/node_modules/pkg")).unwrap();
+        fs::write(e.src.join("web/node_modules/pkg/i.js"), b"j").unwrap();
+        fs::write(e.src.join("web/node_modules.txt"), b"n").unwrap(); // not a folder, kept
+        fs::create_dir_all(e.src.join("build")).unwrap();
+        fs::write(e.src.join("build/out.o"), b"o").unwrap();
+        fs::create_dir_all(e.src.join("src/build")).unwrap(); // only the top-level build is anchored
+        fs::write(e.src.join("src/build/b.rs"), b"b").unwrap();
+        let r = go(&e, 1);
+        assert_eq!((r.status, r.stats.copied, r.stats.excluded), (RunStatus::Ok, 3, 3));
+        let nas = e.dst.join("mac/Documents");
+        assert!(nas.join("keep.txt").exists() && nas.join("web/node_modules.txt").exists() && nas.join("src/build/b.rs").exists());
+        assert!(!nas.join("scratch.TMP").exists() && !nas.join("web/node_modules").exists() && !nas.join("build").exists());
+    }
+
+    #[test]
+    fn excluding_something_already_backed_up_leaves_it_on_the_nas_unflagged() {
+        let mut e = env();
+        fs::write(e.src.join("a.txt"), b"a").unwrap();
+        fs::write(e.src.join("old.tmp"), b"t").unwrap();
+        fs::create_dir_all(e.src.join("cache/deep")).unwrap();
+        fs::write(e.src.join("cache/deep/c.bin"), b"c").unwrap();
+        assert_eq!(go(&e, 1).stats.copied, 3);
+        e = with_excludes(e, &["*.tmp", "cache/"]);
+        let r = go(&e, 2);
+        assert_eq!((r.stats.newly_deleted, r.stats.excluded), (0, 2));
+        assert!(e.store.list_deleted(Some(e.job.id)).unwrap().is_empty());
+        assert!(e.dst.join("mac/Documents/old.tmp").exists(), "the NAS copy is never touched");
+        assert!(e.dst.join("mac/Documents/cache/deep/c.bin").exists());
+    }
+
+    #[test]
+    fn verify_uses_the_same_exclude_patterns() {
+        let e = with_excludes(env(), &["*.tmp", "node_modules/"]);
+        fs::write(e.src.join("a.txt"), b"a").unwrap();
+        fs::write(e.src.join("b.tmp"), b"b").unwrap();
+        fs::create_dir_all(e.src.join("node_modules")).unwrap();
+        fs::write(e.src.join("node_modules/x.js"), b"x").unwrap();
+        go(&e, 1);
+        let v = verify_job(&e.store, &e.conn, &e.job, &AtomicBool::new(false)).unwrap();
+        assert_eq!((v.checked, v.ok, v.missing_total, v.excluded), (1, 1, 0, 2));
+    }
+
+    #[test]
+    fn invalid_pattern_stops_the_run_before_anything_is_copied() {
+        let mut e = env();
+        fs::write(e.src.join("a.txt"), b"a").unwrap();
+        e.job.exclude_names = vec!["[bad".into()];
+        assert!(run_job(&e.store, &e.conn, &e.job, 1, &AtomicBool::new(false), &NoProgress).is_err());
+        assert!(!e.dst.join("mac/Documents/a.txt").exists());
     }
 
     #[test]

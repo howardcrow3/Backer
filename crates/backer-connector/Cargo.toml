@@ -8,6 +8,22 @@ license.workspace = true
 backer-core.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url = "2"
+# SFTP: libssh2. On macOS (and Linux) OpenSSL is built in so the signed app does not depend on a
+# system copy; on Windows libssh2 uses the built-in WinCNG crypto instead (see the target section).
+ssh2 = "0.9"
+# SMB 2/3 in pure Rust, blocking API; signing and encryption on.
+smb = { version = "0.12", default-features = false, features = ["multi_threaded", "sign", "encrypt"] }
+# NFSv3 in pure Rust, driven by a small Tokio runtime per connection.
+nfs3_client = { version = "0.9", features = ["tokio"] }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+nfs3_server = { version = "0.11", features = ["memfs"] }
+
+[target.'cfg(unix)'.dependencies]
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+

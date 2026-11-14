@@ -28,9 +28,35 @@ jobs:
           grep -E "FAILED|panicked|^error" out.txt | head -25 | while IFS= read -r l; do echo "::error::${l//%/%25}"; done
           exit $code
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: UI unit tests
+        shell: bash
+        run: node --test app/ui/tests/*.test.mjs
       - run: ./scripts/check-crate-graph.sh
         shell: bash
+  nas-integration:
+    # Connector and end-to-end backup tests against real SFTP (OpenSSH), SMB (Samba 4.23) and NFS
+    # (kernel nfsd) servers in containers. Runs on every push, pull request and build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start test servers
+        run: |
+          scripts/nas-test-servers.sh up | tee "$RUNNER_TEMP/nas.env"
+          grep -q BACKER_TEST_NFS "$RUNNER_TEMP/nas.env" && echo "NAS_REQUIRE=sftp,smb,nfs" >> "$GITHUB_ENV" || echo "NAS_REQUIRE=sftp,smb" >> "$GITHUB_ENV"
+          sed -e "s/^export //" -e "s/'//g" "$RUNNER_TEMP/nas.env" >> "$GITHUB_ENV"
+      - name: Connector and end-to-end tests
+        run: BACKER_REQUIRE_SERVERS="$NAS_REQUIRE" cargo test -p backer-connector -p backer-agent --no-fail-fast -- --nocapture
+      - name: Server logs
+        if: failure()
+        run: for c in backer-sftp backer-smb backer-nfs; do echo "== $c"; docker logs $c 2>&1 | tail -50 || true; done
+      - run: scripts/nas-test-servers.sh down
+        if: always()
   dmg:
+    needs: [test, nas-integration]   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-15
     steps:
@@ -135,6 +161,7 @@ jobs:
           path: out/*
 
   windows:
+    needs: [test, nas-integration]
     # Unsigned installer for 64-bit Windows. SmartScreen will warn until it is signed.
     runs-on: windows-latest
     steps:

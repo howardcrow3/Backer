@@ -31,3 +31,8 @@ backer-sched = { path = "crates/backer-sched" }
 backer-license = { path = "crates/backer-license" }
 backer-mcp = { path = "crates/backer-mcp" }
 backer-removal = { path = "crates/backer-removal" }
+backer-restore = { path = "crates/backer-restore" }
+
+# smb-transport 0.12.1 with TCP_NODELAY set (see third_party/smb-transport/BACKER-PATCH.md).
+[patch.crates-io]
+smb-transport = { path = "third_party/smb-transport" }

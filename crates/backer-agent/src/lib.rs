@@ -3,11 +3,16 @@ pub mod approvals;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
+pub mod nas;
+pub mod notify;
+pub mod restore;
+pub mod retry;
+pub mod secrets;
 pub mod server;
 pub mod platform;
 
 use jiff::{tz::TimeZone, Timestamp};
-use backer_connector::{Connector, MountedConnector};
+use backer_connector::{hostkeys::HostKeys, Access, Destination, Nas};
 use backer_core::*;
 use backer_engine::{run_job_as, verify_job, NoProgress};
 use backer_mcp::Control;
@@ -47,6 +52,14 @@ pub struct Agent {
     /// A job set-up an assistant asked for (suggested name). The user completes or dismisses it in the app.
     new_job_request: Mutex<Option<String>>,
     pub licensing: licensing::Licensing,
+    restores: restore::Restores,
+    /// FR-18: how long to wait for an unreachable NAS before a run is marked failed.
+    retry: retry::RetryPolicy,
+    notifier: Arc<dyn notify::Notifier>,
+    /// NAS passwords and keys (the OS credential store).
+    pub secrets: Box<dyn secrets::SecretStore>,
+    /// SFTP host keys pinned on first connect.
+    pub host_keys: HostKeys,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -57,15 +70,22 @@ impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
+        let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier: Arc::new(notify::SystemNotifier), restores: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
+    /// Test agent: runs synchronously, retries without waiting, shows no notifications.
     #[doc(hidden)]
     pub fn new_sync(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
+        Self::new_sync_with(db_path, tz, retry::RetryPolicy { retries: 3, delay: std::time::Duration::ZERO }, Arc::new(notify::NullNotifier))
+    }
+    #[doc(hidden)]
+    pub fn new_sync_with(db_path: PathBuf, tz: TimeZone, retry: retry::RetryPolicy, notifier: Arc<dyn notify::Notifier>) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()) });
+        let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -75,8 +95,25 @@ impl Agent {
         Store::open(&self.db_path)
     }
 
-    pub fn connector_for(job: &Job) -> MountedConnector {
-        MountedConnector::new(&job.dest_root)
+    /// The connector for a job's destination, with its password and pinned host key. Never fails:
+    /// a destination that cannot be used reports why when the run checks it.
+    pub fn connector_for(&self, job: &Job) -> Box<dyn Nas> {
+        self.open_dest(&job.dest_root)
+    }
+
+    /// Open a destination (mounted path or NAS URL) with what the OS stores for it.
+    pub fn open_dest(&self, dest_root: &str) -> Box<dyn Nas> {
+        match Destination::parse(dest_root) {
+            Ok(d) => backer_connector::open(&d, self.access_for(&d)),
+            Err(_) => backer_connector::open_url(dest_root, Access::default()),
+        }
+    }
+
+    pub fn access_for(&self, d: &Destination) -> Access {
+        Access {
+            secret: d.credential_key().and_then(|k| self.secrets.get(&k)),
+            host_key: d.host_key_id().and_then(|k| self.host_keys.get(&k)),
+        }
     }
 
     pub fn start_job(self: &Arc<Self>, id: JobId) -> Result<Start> {
@@ -87,6 +124,13 @@ impl Agent {
         let job = self.store()?.get_job(id)?.ok_or_else(|| Error::Invalid(format!("no job {id}")))?;
         if !self.licensing.may_back_up(now_ts().as_second()) {
             return Err(Error::Invalid(licensing::TRIAL_ENDED.into()));
+        }
+        // Don't back up a folder while files are being restored into it; a scheduled run waits for the next tick.
+        if self.restoring(id) {
+            if trigger == Trigger::Schedule {
+                return Ok(Start::AlreadyRunning);
+            }
+            return Err(Error::Invalid("Backer is restoring files for this job. Back up again when the restore has finished.".into()));
         }
         let cancel = {
             let mut st = self.state.lock().unwrap();
@@ -110,9 +154,15 @@ impl Agent {
         let work = move || {
             let _awake = platform::AwakeGuard::new();
             if let Ok(store) = me.store() {
-                let conn = Agent::connector_for(&job);
-                let _ = run_job_as(&store, &conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
+                let conn = me.connector_for(&job);
+                // FR-18: wait out a NAS that is briefly away. The engine then records the run as usual,
+                // including a failed run if the NAS never came back.
+                let reach = retry::wait_until_reachable(&*conn, &me.retry, &cancel);
+                let run = run_job_as(&store, &*conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
                 let _ = store.prune_logs(KEEP_LOG_RUNS);
+                if let Some((title, body)) = failure_notice(&job, &reach, run.as_ref().ok(), &me.retry) {
+                    me.notifier.notify(&title, &body);
+                }
             }
             let next = {
                 let mut st = me.state.lock().unwrap();
@@ -192,7 +242,7 @@ impl Agent {
         if self.is_running(id) {
             return Err("This job is backing up right now. Check it again when the backup has finished.".into());
         }
-        let rep = verify_job(&store, &Agent::connector_for(&job), &job, &AtomicBool::new(false)).map_err(es)?;
+        let rep = verify_job(&store, &*self.connector_for(&job), &job, &AtomicBool::new(false)).map_err(es)?;
         serde_json::to_value(rep).map_err(|e| e.to_string())
     }
 
@@ -217,12 +267,34 @@ impl Agent {
         Ok(json!({"deleted": true}))
     }
 
-    fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
+    pub(crate) fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
 }
 
-fn es(e: Error) -> String {
+/// Spec 8.3: a failed run raises a notification by default. A run the user stopped does not.
+fn failure_notice(job: &Job, reach: &retry::Reach, run: Option<&RunSummary>, policy: &retry::RetryPolicy) -> Option<(String, String)> {
+    if matches!(reach, retry::Reach::Cancelled) {
+        return None;
+    }
+    let run = run?;
+    if run.status != RunStatus::Failed {
+        return None;
+    }
+    let title = format!("Backup of \"{}\" failed", job.name);
+    let body = match reach {
+        retry::Reach::Unreachable { .. } if policy.retries > 0 => format!(
+            "Backer could not reach the NAS, even after trying {} more times over {}. It will try again at the next scheduled backup.",
+            policy.retries,
+            retry::describe(policy.total_wait())
+        ),
+        retry::Reach::Unreachable { .. } => "Backer could not reach the NAS. It will try again at the next scheduled backup.".to_string(),
+        _ => run.message.clone().unwrap_or_else(|| "Open Backer to see what went wrong.".into()),
+    };
+    Some((title, body))
+}
+
+pub(crate) fn es(e: Error) -> String {
     e.to_string()
 }
 
@@ -254,7 +326,7 @@ impl Control for AgentControl {
     fn test_connection(&self, id: JobId) -> std::result::Result<Value, String> {
         let s = self.0.store().map_err(es)?;
         let j = self.0.require_job(&s, id)?;
-        Ok(match Agent::connector_for(&j).check_ready() {
+        Ok(match self.0.connector_for(&j).check_ready() {
             Ok(()) => json!({"ok": true}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
         })
@@ -325,21 +397,30 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
             "save_job" => {
                 let mut job: Job = serde_json::from_value(p.get("job").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
+                Destination::parse(&job.dest_root).map_err(es)?;
                 let id = agent.store().map_err(es)?.save_job(&mut job).map_err(es)?;
                 *agent.new_job_request.lock().unwrap() = None; // the user has set up a job, so any waiting request is done
                 Ok(json!({"job_id": id}))
             }
+            // `path` is a mounted folder or a NAS URL (sftp://, smb://, nfs://).
             "check_destination" => {
                 let root = p.get("path").and_then(Value::as_str).ok_or("path required")?;
-                Ok(json!({"ready": MountedConnector::new(root).check_ready().is_ok()}))
+                Ok(json!({"ready": agent.open_dest(root).check_ready().is_ok()}))
             }
             "init_destination" => {
                 let root = p.get("path").and_then(Value::as_str).ok_or("path required")?;
-                let c = MountedConnector::new(root);
-                if !std::path::Path::new(root).is_dir() { return Err("not a folder".into()); }
+                let c = agent.open_dest(root);
+                c.reachable().map_err(|_| "not a folder".to_string())?;
                 c.init_marker().map_err(es)?;
                 Ok(json!({"ok": true}))
             }
+            // Restore (app only; assistants cannot write to this computer).
+            "browse_backup" => agent.browse_backup(need()?, p.get("path").and_then(Value::as_str).unwrap_or("")),
+            "plan_restore" => agent.plan_restore(need()?, &p),
+            "start_restore" => agent.start_restore(p.get("plan_id").and_then(Value::as_u64).ok_or("plan_id required")?, p.get("replace").and_then(Value::as_bool).unwrap_or(false)),
+            "restore_status" => Ok(agent.restore_status()),
+            "cancel_restore" => Ok(json!({"cancelled": agent.cancel_restore()})),
+            "dismiss_restore" => { agent.dismiss_restore(); Ok(json!({"ok": true})) }
             "list_deleted" => serde_json::to_value(agent.store().map_err(es)?.list_deleted(id).map_err(es)?).map_err(|e| e.to_string()),
             "keep_deleted" => {
                 let s = agent.store().map_err(es)?;
@@ -349,9 +430,10 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "remove_deleted" => {
                 let s = agent.store().map_err(es)?;
                 let j = agent.require_job(&s, need()?)?;
-                let r = backer_removal::remove_reviewed(&s, &Agent::connector_for(&j), j.id, &paths(&p)?).map_err(es)?;
+                let r = backer_removal::remove_reviewed(&s, &*agent.connector_for(&j), j.id, &paths(&p)?).map_err(es)?;
                 Ok(Value::Array(r.into_iter().map(|(path, o)| json!({"path": path, "outcome": format!("{o:?}")})).collect()))
             }
+            m if m.starts_with("nas_") => nas::handle(agent, m, &p),
             _ => Err(format!("unknown method {method}")),
         }
     })();
@@ -564,6 +646,29 @@ mod tests {
         assert_eq!(s.list_runs(t.id, 5).unwrap().len(), 1);
     }
 
+    fn summary(status: RunStatus, message: Option<&str>) -> RunSummary {
+        RunSummary { id: 1, job_id: 1, started: 0, finished: Some(1), status, stats: RunStats::default(), message: message.map(String::from) }
+    }
+
+    #[test]
+    fn failure_notice_explains_an_unreachable_nas_and_skips_other_outcomes() {
+        let t = setup();
+        let job = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
+        let p = retry::RetryPolicy::default();
+        let away = retry::Reach::Unreachable { error: "gone".into() };
+        let (title, body) = failure_notice(&job, &away, Some(&summary(RunStatus::Failed, Some("gone"))), &p).unwrap();
+        assert_eq!(title, "Backup of \"j\" failed");
+        assert!(body.contains("3 more times over 15 minutes") && body.contains("next scheduled backup"), "{body}");
+        // Other failures pass on the engine's message.
+        let ready = retry::Reach::Ready { retries_used: 0 };
+        let (_, body) = failure_notice(&job, &ready, Some(&summary(RunStatus::Failed, Some("source not available: /x"))), &p).unwrap();
+        assert_eq!(body, "source not available: /x");
+        // Success, warnings and a stopped job raise nothing.
+        assert!(failure_notice(&job, &ready, Some(&summary(RunStatus::Ok, None)), &p).is_none());
+        assert!(failure_notice(&job, &ready, Some(&summary(RunStatus::Warnings, None)), &p).is_none());
+        assert!(failure_notice(&job, &retry::Reach::Cancelled, Some(&summary(RunStatus::Failed, None)), &p).is_none());
+    }
+
     #[test]
     fn assistant_can_change_schedule_but_not_destination() {
         let t = setup();
@@ -571,5 +676,99 @@ mod tests {
         let j = t.agent.store().unwrap().get_job(t.id).unwrap().unwrap();
         assert_eq!(j.schedule, Schedule::Manual);
         assert_eq!(j.dest_root, t.dst.to_string_lossy());
+    }
+    #[test]
+    fn editing_exclude_patterns_in_the_app_applies_to_the_next_run() {
+        let t = setup();
+        fs::write(t.src.join("a.txt"), b"1").unwrap();
+        fs::write(t.src.join("b.tmp"), b"2").unwrap();
+        fs::create_dir_all(t.src.join("node_modules")).unwrap();
+        fs::write(t.src.join("node_modules/x.js"), b"3").unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&t.agent, &json!({"method": m, "params": p}));
+        let mut job = ui("get_job", json!({"job_id": t.id}))["result"]["job"].clone();
+        // A broken pattern is refused with the pattern named, and the saved job is unchanged.
+        job["exclude_names"] = json!(["*.tmp", "[oops"]);
+        let r = ui("save_job", json!({"job": job}));
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("[oops"), "{r}");
+        assert!(ui("get_job", json!({"job_id": t.id}))["result"]["job"]["exclude_names"].as_array().unwrap().is_empty());
+        job["exclude_names"] = json!(["*.tmp", "node_modules/"]);
+        assert_eq!(ui("save_job", json!({"job": job}))["result"]["job_id"], t.id);
+        assert_eq!(ui("get_job", json!({"job_id": t.id}))["result"]["job"]["exclude_names"], json!(["*.tmp", "node_modules/"]));
+        t.agent.start_job(t.id).unwrap();
+        assert!(t.dst.join("mac/src/a.txt").exists());
+        assert!(!t.dst.join("mac/src/b.tmp").exists() && !t.dst.join("mac/src/node_modules").exists());
+        let v = ui("verify_job", json!({"job_id": t.id}))["result"].clone();
+        assert_eq!((v["checked"].as_u64(), v["excluded"].as_u64()), (Some(1), Some(2)));
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::fs;
+
+    fn setup() -> (tempfile::TempDir, PathBuf, Arc<Agent>, JobId) {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("nas"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a"), b"1").unwrap();
+        let agent = Agent::new_sync(t.path().join("db.sqlite"), TimeZone::get("America/Los_Angeles").unwrap()).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
+        ui("init_destination", json!({"path": dst}));
+        let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+        let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
+        agent.start_job(id).unwrap();
+        (t, src, agent, id)
+    }
+
+    #[test]
+    fn restore_is_not_an_assistant_tool() {
+        let names: Vec<String> = backer_mcp::tool_list().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect();
+        assert!(names.iter().all(|n| !n.contains("restore") && !n.contains("browse")), "{names:?}");
+    }
+
+    #[test]
+    fn restore_works_after_the_trial_ends() {
+        let (t, src, agent, id) = setup();
+        let started = now_ts().as_second() - 30 * 86_400;
+        fs::write(t.path().join("license.json"), json!({"first_run": started, "last_seen": started, "key": null}).to_string()).unwrap();
+        let agent2 = Agent::new_sync(t.path().join("db.sqlite"), TimeZone::get("America/Los_Angeles").unwrap()).unwrap();
+        drop(agent);
+        fs::remove_file(src.join("a")).unwrap();
+        let ui = |m: &str, p: Value| handle_ui(&agent2, &json!({"method": m, "params": p}));
+        assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
+        let plan = ui("plan_restore", json!({"job_id": id, "paths": ["mac/src/a"]}));
+        assert_eq!(ui("start_restore", json!({"plan_id": plan["result"]["plan_id"], "replace": false}))["ok"], true);
+        assert_eq!(fs::read(src.join("a")).unwrap(), b"1");
+    }
+
+    #[test]
+    fn stale_or_unknown_plans_are_refused() {
+        let (_t, _src, agent, id) = setup();
+        let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
+        assert_eq!(ui("start_restore", json!({"plan_id": 999}))["ok"], false);
+        // Only the newest few plans are kept.
+        let first = ui("plan_restore", json!({"job_id": id, "paths": ["mac/src"]}))["result"]["plan_id"].clone();
+        for _ in 0..5 {
+            ui("plan_restore", json!({"job_id": id, "paths": ["mac/src"]}));
+        }
+        assert!(ui("start_restore", json!({"plan_id": first}))["error"].as_str().unwrap().contains("out of date"));
+        assert_eq!(ui("plan_restore", json!({"job_id": id, "paths": []}))["ok"], false);
+    }
+
+    #[test]
+    fn backups_wait_while_restoring_into_the_job() {
+        let (_t, _src, agent, id) = setup();
+        // Pretend a restore is in progress for this job.
+        let plan = agent.plan_restore(id, &json!({"paths": ["mac/src"]})).unwrap();
+        assert!(plan["plan_id"].as_u64().is_some());
+        agent.fake_running_restore(id);
+        assert!(agent.restoring(id));
+        assert!(agent.start_job(id).unwrap_err().to_string().contains("restoring"));
+        assert_eq!(agent.start_job_as(id, Trigger::Schedule).unwrap(), Start::AlreadyRunning);
+        assert!(agent.start_restore(plan["plan_id"].as_u64().unwrap(), false).unwrap_err().contains("already in progress"));
     }
 }

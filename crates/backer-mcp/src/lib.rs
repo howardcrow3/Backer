@@ -55,9 +55,9 @@ pub fn tool_list() -> Value {
             json!({"run_id": {"type":"integer"}, "kind": {"type":"string"}, "search": {"type":"string"}, "offset": {"type":"integer"}, "limit": {"type":"integer"}}), &["run_id"]),
         tool("test_connection", "Check the NAS destination of a job is reachable.", id.clone(), &["job_id"]),
         tool("run_job", "Start a job now.", id.clone(), &["job_id"]),
-        tool("set_schedule", "Change a job's schedule. kind: manual | every_hours | daily | weekly.", json!({
+        tool("set_schedule", "Change a job's schedule. kind: manual | every_minutes (minutes 5-1440) | every_hours | daily | weekly | monthly (day 1-31; shorter months use their last day).", json!({
             "job_id": {"type":"integer"}, "kind": {"type":"string", "enum": ["manual","every_hours","daily","weekly"]},
-            "hours": {"type":"integer"}, "hour": {"type":"integer"}, "minute": {"type":"integer"},
+            "minutes": {"type":"integer"}, "hours": {"type":"integer"}, "day": {"type":"integer", "minimum":1, "maximum":31}, "hour": {"type":"integer"}, "minute": {"type":"integer"},
             "days": {"type":"array", "items": {"type":"integer", "minimum":1, "maximum":7}}}), &["job_id","kind"]),
         tool("pause_job", "Pause scheduled runs of a job.", id.clone(), &["job_id"]),
         tool("resume_job", "Resume scheduled runs of a job.", id, &["job_id"]),
@@ -72,16 +72,27 @@ fn parse_schedule(a: &Value) -> Result<Schedule, String> {
     let n = |k: &str| a.get(k).and_then(Value::as_u64);
     match a.get("kind").and_then(Value::as_str) {
         Some("manual") => Ok(Schedule::Manual),
+        Some("every_minutes") => {
+            let m = n("minutes").ok_or("minutes required")?;
+            if !(Schedule::MIN_EVERY_MINUTES as u64..=Schedule::MAX_EVERY_MINUTES as u64).contains(&m) {
+                return Err(format!("minutes must be {}-{}", Schedule::MIN_EVERY_MINUTES, Schedule::MAX_EVERY_MINUTES));
+            }
+            Ok(Schedule::EveryMinutes { minutes: m as u32 })
+        }
         Some("every_hours") => {
             let h = n("hours").ok_or("hours required")?;
             if !(1..=168).contains(&h) { return Err("hours must be 1-168".into()); }
             Ok(Schedule::EveryHours { hours: h as u32 })
         }
-        Some(k @ ("daily" | "weekly")) => {
+        Some(k @ ("daily" | "weekly" | "monthly")) => {
             let (h, m) = (n("hour").ok_or("hour required")?, n("minute").unwrap_or(0));
             if h > 23 || m > 59 { return Err("bad time".into()); }
             if k == "daily" {
                 Ok(Schedule::Daily { hour: h as u8, minute: m as u8 })
+            } else if k == "monthly" {
+                let day = n("day").ok_or("day required")?;
+                if !(1..=31).contains(&day) { return Err("day must be 1-31".into()); }
+                Ok(Schedule::Monthly { day: day as u8, hour: h as u8, minute: m as u8 })
             } else {
                 let days: Vec<u8> = a.get("days").and_then(Value::as_array).ok_or("days required")?
                     .iter().filter_map(|d| d.as_u64()).map(|d| d as u8).collect();
@@ -204,5 +215,15 @@ mod tests {
         assert_eq!(handle(&f, &bad).unwrap()["result"]["isError"], true);
         let ok = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_schedule","arguments":{"job_id":1,"kind":"weekly","hour":3,"days":[1,5]}}});
         assert!(handle(&f, &ok).unwrap()["result"].get("isError").is_none());
+        let call = |args: Value| handle(&f, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_schedule","arguments":args}})).unwrap();
+        assert!(call(json!({"job_id":1,"kind":"every_minutes","minutes":15}))["result"].get("isError").is_none());
+        assert_eq!(call(json!({"job_id":1,"kind":"every_minutes","minutes":2}))["result"]["isError"], true);
+        assert_eq!(call(json!({"job_id":1,"kind":"every_minutes"}))["result"]["isError"], true);
+        assert!(call(json!({"job_id":1,"kind":"monthly","day":31,"hour":4}))["result"].get("isError").is_none());
+        assert_eq!(call(json!({"job_id":1,"kind":"monthly","day":0,"hour":4}))["result"]["isError"], true);
+        assert_eq!(call(json!({"job_id":1,"kind":"monthly","hour":4}))["result"]["isError"], true);
+        let log = f.0.lock().unwrap();
+        assert!(log.iter().any(|l| l.contains("EveryMinutes { minutes: 15 }")));
+        assert!(log.iter().any(|l| l.contains("Monthly { day: 31, hour: 4, minute: 0 }")));
     }
 }

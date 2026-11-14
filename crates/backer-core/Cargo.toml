@@ -8,3 +8,8 @@ license.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 jiff.workspace = true
+globset = { version = "0.4", default-features = false }
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
