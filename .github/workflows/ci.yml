@@ -231,6 +231,15 @@ jobs:
           TAG="${{ inputs.release_tag || github.ref_name }}"
           gh release create "$TAG" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Backer $TAG" --generate-notes
+      - name: Tell the website about the release
+        # Triggers "Publish Backer releases to the site" in howardcrow3/highturtle so the releases and notes pages update
+        # now. Needs the HIGHTURTLE_DISPATCH_TOKEN secret; without it the site still catches up within 15 minutes.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HIGHTURTLE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "HIGHTURTLE_DISPATCH_TOKEN not set; the site will update on its next 15-minute check."; exit 0; fi
+          gh api repos/howardcrow3/highturtle/dispatches -f event_type=backer-release -f "client_payload[tag]=${{ inputs.release_tag || github.ref_name }}"
       - name: Point the README at this build
         env:
           GH_TOKEN: ${{ github.token }}
