@@ -37,7 +37,12 @@
     "externalBin": [
       "binaries/backer-agent"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "wix": {
+        "language": "en-US"
+      }
+    }
   },
   "plugins": {
     "updater": {

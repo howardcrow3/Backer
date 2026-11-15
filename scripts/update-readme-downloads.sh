@@ -6,7 +6,7 @@ set -euo pipefail
 tag=$1 repo=$2 dist=$3 readme=${4:-README.md} date=${5:-$(date -u +%Y-%m-%d)}
 base="https://github.com/$repo"
 dmg=$(cd "$dist" && ls ./*.dmg 2>/dev/null | head -1 | sed 's|^\./||' || true)
-exe=$(cd "$dist" && ls ./*.exe 2>/dev/null | head -1 | sed 's|^\./||' || true)
+exe=$(cd "$dist" && ls ./*.msi 2>/dev/null | head -1 | sed 's|^\./||' || true)
 
 block="**Latest build: [$tag]($base/releases/tag/$tag)** ($date)
 
@@ -18,7 +18,7 @@ block="**Latest build: [$tag]($base/releases/tag/$tag)** ($date)
 | Windows 10/11, 64-bit | [$exe]($base/releases/download/$tag/$exe) |"
 block+="
 
-The Mac build is ad hoc signed, not notarized: right-click the app, choose Open, then Open again. The Windows installer is unsigned: if SmartScreen warns, choose More info, then Run anyway. Older builds are on the [releases page]($base/releases)."
+The Mac build is ad hoc signed, not notarized: right-click the app, choose Open, then Open again. The Windows MSI is unsigned: if SmartScreen warns, choose More info, then Run anyway. Older builds are on the [releases page]($base/releases)."
 
 BLOCK="$block" README="$readme" python3 - <<'PY'
 import os, re
