@@ -39,8 +39,8 @@
     ],
     "createUpdaterArtifacts": true,
     "windows": {
-      "nsis": {
-        "installMode": "perMachine"
+      "wix": {
+        "language": "en-US"
       }
     }
   },

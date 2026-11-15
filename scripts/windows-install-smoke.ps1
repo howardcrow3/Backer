@@ -1,5 +1,5 @@
-# Installs the built Windows setup.exe for real, launches it, checks the background agent answers, then uninstalls.
-# Run on a Windows machine: powershell -File scripts/windows-install-smoke.ps1 -Installer path\to\Backer_x64-setup.exe
+# Installs the built Windows MSI for real, launches it, checks the background agent answers, then uninstalls.
+# Run on a Windows machine: powershell -File scripts/windows-install-smoke.ps1 -Installer path\to\Backer_x64_en-US.msi
 param([Parameter(Mandatory)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "::group::$m" }
@@ -10,13 +10,15 @@ $installDir = Join-Path $env:ProgramFiles 'Backer'            # per-machine inst
 $dataDir = Join-Path $env:LOCALAPPDATA 'Backer'               # the agent's data stays per user
 
 Step 'Silent install'
-$p = Start-Process -FilePath $Installer -ArgumentList '/S' -PassThru -Wait
+$log = Join-Path $env:RUNNER_TEMP 'backer-msi-install.log'
+if (-not $env:RUNNER_TEMP) { $log = Join-Path $env:TEMP 'backer-msi-install.log' }
+$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$Installer`" /qn /norestart /l*v `"$log`"" -PassThru -Wait
 Write-Host "installer exit code: $($p.ExitCode)"
-if ($p.ExitCode -ne 0) { Fail "Installer exited with $($p.ExitCode)" }
+if ($p.ExitCode -ne 0) { Get-Content $log -Tail 60 -ErrorAction SilentlyContinue | Write-Host; Fail "msiexec exited with $($p.ExitCode)" }
 Get-ChildItem -Recurse $installDir | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-$uninst = Get-ChildItem -Path $installDir -Filter 'uninstall*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $uninst) { Fail 'No uninstaller was installed' }
-$app = Get-ChildItem -Path $installDir -Filter '*.exe' | Where-Object { $_.Name -notlike 'uninstall*' -and $_.Name -ne 'backer-agent.exe' } | Select-Object -First 1
+$product = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Backer' } | Select-Object -First 1
+if (-not $product) { Fail 'Backer is not listed under Apps & features (no per-machine uninstall entry)' }
+$app = Get-ChildItem -Path $installDir -Filter '*.exe' | Where-Object { $_.Name -ne 'backer-agent.exe' } | Select-Object -First 1
 $agent = Join-Path $installDir 'backer-agent.exe'
 if (-not $app) { Fail 'The app executable was not installed' }
 if (Test-Path (Join-Path $env:LOCALAPPDATA 'Backer\backer-agent.exe')) { Fail 'The program was installed under AppData\Local instead of Program Files' }
@@ -70,7 +72,7 @@ try { Ask 'quit_agent' | Out-Null } catch {}
 Start-Sleep -Seconds 3
 Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($installDir) } | Stop-Process -Force
 schtasks /Delete /TN BackerAgent /F 2>&1 | Out-Null
-$u = Start-Process -FilePath $uninst.FullName -ArgumentList '/S' -PassThru -Wait
+$u = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x `"$Installer`" /qn /norestart" -PassThru -Wait
 Write-Host "uninstaller exit code: $($u.ExitCode)"
 Start-Sleep -Seconds 3
 if (Test-Path $app.FullName) { Fail 'The app executable is still there after uninstall' }
