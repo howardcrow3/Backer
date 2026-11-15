@@ -242,6 +242,9 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        // Must be the first plugin. A second launch (double-click, Start menu, Dock, login item) does not start
+        // another tray icon or window: it asks the running copy to show its window and then exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update])

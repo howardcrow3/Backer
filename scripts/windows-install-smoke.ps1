@@ -6,8 +6,8 @@ function Step($m) { Write-Host "::group::$m" }
 function EndStep { Write-Host '::endgroup::' }
 function Fail($m) { Write-Host "::error::$m"; exit 1 }
 
-$installDir = Join-Path $env:LOCALAPPDATA 'Backer'          # NSIS current-user default
-$dataDir = Join-Path $env:LOCALAPPDATA 'Backer'               # the agent's data dir is the same folder
+$installDir = Join-Path $env:ProgramFiles 'Backer'            # per-machine install: the program lives in Program Files
+$dataDir = Join-Path $env:LOCALAPPDATA 'Backer'               # the agent's data stays per user
 
 Step 'Silent install'
 $p = Start-Process -FilePath $Installer -ArgumentList '/S' -PassThru -Wait
@@ -19,6 +19,8 @@ if (-not $uninst) { Fail 'No uninstaller was installed' }
 $app = Get-ChildItem -Path $installDir -Filter '*.exe' | Where-Object { $_.Name -notlike 'uninstall*' -and $_.Name -ne 'backer-agent.exe' } | Select-Object -First 1
 $agent = Join-Path $installDir 'backer-agent.exe'
 if (-not $app) { Fail 'The app executable was not installed' }
+if (Test-Path (Join-Path $env:LOCALAPPDATA 'Backer\backer-agent.exe')) { Fail 'The program was installed under AppData\Local instead of Program Files' }
+if (-not $app.FullName.StartsWith($env:ProgramFiles)) { Fail "The app was installed outside Program Files: $($app.FullName)" }
 if (-not (Test-Path $agent)) { Fail 'backer-agent.exe was not installed next to the app' }
 EndStep
 
@@ -50,6 +52,17 @@ $reply = WaitAgent 20
 if (-not $reply) { Fail 'The background agent never answered after the app was launched' }
 Write-Host "agent replied: $reply"
 if (-not (schtasks /Query /TN BackerAgent 2>&1 | Out-String) -match 'BackerAgent') { Fail 'Login task BackerAgent was not registered' }
+EndStep
+
+Step 'A second launch must not start a second copy'
+$name = [IO.Path]::GetFileNameWithoutExtension($app.Name)
+$second = Start-Process -FilePath $app.FullName -PassThru
+Start-Sleep -Seconds 6
+$copies = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+Write-Host "running copies of ${name}: $($copies.Count)"
+if ($copies.Count -ne 1) { Fail "Expected exactly one running copy after a second launch, found $($copies.Count)" }
+if (-not $second.HasExited) { Fail 'The second launch did not exit on its own' }
+if ($proc.HasExited) { Fail 'The first copy died when the second one was launched' }
 EndStep
 
 Step 'Quit and uninstall'
