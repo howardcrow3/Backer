@@ -96,7 +96,13 @@ async function showUpdate(force = false) {
   if (!b) { b = document.createElement('div'); b.id = 'upd'; b.className = 'banner'; document.body.prepend(b); }
   b.innerHTML = `<span>Backer ${esc(u.version)} is available (you have ${esc(u.current)}). Installing restarts Backer; a backup in progress stops and resumes at its next scheduled time.</span> <button class="pri" data-install>Install and restart</button>`;
 }
-async function appVersion() { try { return await T.app.getVersion(); } catch { return ''; } }
+async function appVersion() {
+  try {
+    const v = await T.app.getVersion();
+    const b = await T.core.invoke('build_number').catch(() => '');
+    return b ? `${v} (build ${b})` : v;
+  } catch { return ''; }
+}
 
 function licenseHtml(l) {
   const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer.`
