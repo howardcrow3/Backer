@@ -59,6 +59,8 @@ jobs:
     needs: [test, nas-integration]   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
     runs-on: macos-15
+    env:
+      BACKER_BUILD: ${{ github.run_number }}   # build number: counts up with every CI run; shown in Settings and in the file name
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -153,6 +155,8 @@ jobs:
         run: |
           mkdir out
           cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/ || cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg out/
+          # Put the build number in the file name: Backer_0.7.0_aarch64.dmg -> Backer_0.7.0_build123_aarch64.dmg
+          for f in out/*.dmg; do mv "$f" "$(echo "$f" | sed -E "s/_(aarch64)\.dmg$/_build${BACKER_BUILD}_\1.dmg/")"; done
           # Update package and its signature (only present when the updater key is set).
           cp app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz* out/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
@@ -164,6 +168,8 @@ jobs:
     needs: [test, nas-integration]
     # Unsigned per-machine MSI for 64-bit Windows (installs to Program Files). SmartScreen will warn until it is signed.
     runs-on: windows-latest
+    env:
+      BACKER_BUILD: ${{ github.run_number }}   # build number: counts up with every CI run; shown in Settings and in the file name
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -202,6 +208,11 @@ jobs:
         run: |
           CFG=(); [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && CFG=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
           cargo tauri build "${CFG[@]}" --bundles msi
+          # Put the build number in the file name: Backer_0.7.0_x64_en-US.msi -> Backer_0.7.0_build123_x64_en-US.msi
+          # (the .sig moves with it). The MSI's own ProductVersion is unchanged, so upgrades behave as before.
+          cd target/release/bundle/msi
+          for f in *.msi *.msi.sig; do [ -e "$f" ] && mv "$f" "$(echo "$f" | sed -E "s/_(x64_)/_build${BACKER_BUILD}_\1/")"; done
+          ls -l
       - name: Install, launch and uninstall the installer (real install on the runner)
         shell: pwsh
         run: |

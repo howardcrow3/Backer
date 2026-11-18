@@ -200,6 +200,12 @@ fn run_all() {
     }
 }
 
+/// The build number CI stamped into this build ("dev" for a local build).
+#[tauri::command]
+fn build_number() -> &'static str {
+    env!("BACKER_BUILD_NUMBER")
+}
+
 #[derive(serde::Serialize)]
 struct UpdateInfo {
     version: String,
@@ -247,7 +253,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, build_number])
         .setup(|app| {
             ensure_agent();
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;
