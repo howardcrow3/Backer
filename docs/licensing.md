@@ -63,5 +63,4 @@ working for everyone after the first two. The license service is the `turtlebox-
 
 A key is tied to an email and counted per computer, so posting it online stops working after two computers, but a customer can
 still lend it to one friend. Someone determined can also edit their own copy of the app, or copy a key's two
-places to virtual machines with made-up machine ids; the check stops casual sharing, not a hostile cracker. Two units bought in one
-order get identical keys (same email, same day), so they share the 2 computers.
+places to virtual machines with made-up machine ids; the check stops casual sharing, not a hostile cracker.
