@@ -8,6 +8,8 @@
 //!   format (1) | edition | major | issued day (u32 BE, days since 1970-01-01) | email length | email bytes
 //! The key text is `BACKER-` + base32(payload || 64-byte signature), in groups of five characters.
 
+pub mod activation;
+
 use data_encoding::BASE32_NOPAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
@@ -105,6 +107,16 @@ fn decode_text(key: &str) -> Result<Vec<u8>, LicenseError> {
     BASE32_NOPAD.decode(clean.as_bytes()).map_err(|_| LicenseError::Malformed)
 }
 
+/// The id the license service uses for a key: SHA-256 of the key's bytes, in hex. Same for any way of writing the key.
+pub fn key_id(key: &str) -> Result<String, LicenseError> {
+    use sha2::{Digest, Sha256};
+    let raw = decode_text(key)?;
+    if raw.len() < 8 + 64 {
+        return Err(LicenseError::Malformed);
+    }
+    Ok(data_encoding::HEXLOWER.encode(&Sha256::digest(raw)))
+}
+
 /// Builds a key from a payload and its signature (used by the issuing tool and by tests).
 pub fn encode_key(payload: &[u8], signature: &[u8; 64]) -> String {
     let mut raw = payload.to_vec();
@@ -129,7 +141,8 @@ pub fn make_payload(email: &str, edition: u8, major: u8, issued_day: u32) -> Res
 #[cfg(any(feature = "issue", test))]
 pub mod issue {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::Signer;
+    pub use ed25519_dalek::SigningKey;
 
     pub fn new_signing_key() -> SigningKey {
         let mut seed = [0u8; 32];

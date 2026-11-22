@@ -45,6 +45,12 @@ fn main() -> Result<()> {
             std::thread::spawn(move || { let _ = server::serve_ui(a1, ui); });
             let a2 = agent.clone();
             std::thread::spawn(move || { let _ = server::serve_mcp(a2, mcp); });
+            // Keeps the license activation fresh (a token is renewed after 7 days). Never blocks backups: a failed call is retried later.
+            let a3 = agent.clone();
+            std::thread::spawn(move || loop {
+                a3.licensing.refresh(backer_agent::now_ts().as_second());
+                std::thread::sleep(Duration::from_secs(30 * 60));
+            });
             // Wall-clock based, so a sleep/wake gap simply makes the next tick catch up.
             while !agent.quit_requested() {
                 let _ = agent.tick(backer_agent::now_ts());
