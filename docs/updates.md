@@ -20,7 +20,7 @@ Code: `app/src-tauri/src/main.rs` (`check_update`, `install_update`), `app/ui/ap
    (`plugins.updater.pubkey`) with the printed public key (safe to commit). Until then the app never checks for updates.
 3. **GitHub secrets** (repository Settings, Secrets and variables, Actions): `TAURI_SIGNING_PRIVATE_KEY` (the private key
    file's contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-4. **Create the AWS hosting.** Easiest: Actions tab, **Update hosting setup (AWS, run by hand)**, Run workflow (needs the temporary `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets; add an optional `REPO_ADMIN_TOKEN` and it also sets the three values below for you; otherwise the run summary lists them). Or by hand: deploy `tools/update-hosting/template.yaml` with CloudFormation
+4. **Create the AWS hosting.** Easiest: in the **highturtle** repository (where the AWS setup keys live), Actions tab, **Backer update hosting setup (AWS, run by hand)**, Run workflow. It deploys this template and, if highturtle has a `BACKER_ADMIN_TOKEN` secret (fine-grained token on this repo with Variables and Secrets read/write), sets the values below on this repository; otherwise the run summary lists them. Or by hand: deploy `tools/update-hosting/template.yaml` with CloudFormation
    (`aws cloudformation deploy --template-file tools/update-hosting/template.yaml --stack-name backer-updates --capabilities CAPABILITY_IAM`).
    If the account already has the GitHub OIDC provider, add
    `--parameter-overrides CreateGitHubOidcProvider=false ExistingOidcProviderArn=<arn>`.
