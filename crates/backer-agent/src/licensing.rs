@@ -254,7 +254,7 @@ impl Licensing {
             if self.valid_license(&s.key).is_none() {
                 return;
             }
-            let due = self.bound_token(&s).map_or(true, |a| now >= a.refresh_after);
+            let due = self.bound_token(&s).is_none_or(|a| now >= a.refresh_after);
             if !due {
                 return;
             }
