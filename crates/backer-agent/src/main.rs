@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use jiff::tz::TimeZone;
-use backer_agent::{ipc::Listener, platform, server, Agent};
+use backer_agent::{ipc::Listener, platform, server, svclog::SvcLog, Agent};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -38,22 +38,43 @@ fn main() -> Result<()> {
             Ok(())
         }
         "run" => {
-            let agent = Agent::new(dir.join("state.sqlite"), TimeZone::system()).context("opening state")?;
-            let ui = Listener::bind(&dir, "ui").context("ui listener")?;
-            let mcp = Listener::bind(&dir, "mcp").context("mcp listener")?;
+            let log = std::sync::Arc::new(SvcLog::new(&dir));
+            log.line(&format!("service starting, version {}, data folder {}", env!("CARGO_PKG_VERSION"), dir.display()));
+            let agent = Agent::new(dir.join("state.sqlite"), TimeZone::system()).map_err(|e| {
+                log.line(&format!("could not open state: {e:#}"));
+                e
+            }).context("opening state")?;
+            let ui = Listener::bind(&dir, "ui").map_err(|e| {
+                log.line(&format!("could not start the app listener: {e:#}"));
+                e
+            }).context("ui listener")?;
+            let mcp = Listener::bind(&dir, "mcp").map_err(|e| {
+                log.line(&format!("could not start the assistant listener: {e:#}"));
+                e
+            }).context("mcp listener")?;
+            log.line("listeners ready");
             let a1 = agent.clone();
-            std::thread::spawn(move || { let _ = server::serve_ui(a1, ui); });
+            let l1 = log.clone();
+            std::thread::spawn(move || { if let Err(e) = server::serve_ui(a1, ui) { l1.line(&format!("app listener stopped: {e}")); } });
             let a2 = agent.clone();
-            std::thread::spawn(move || { let _ = server::serve_mcp(a2, mcp); });
+            let l2 = log.clone();
+            std::thread::spawn(move || { if let Err(e) = server::serve_mcp(a2, mcp) { l2.line(&format!("assistant listener stopped: {e}")); } });
+            let mut last_err = String::new();
             // Keeps the license activation fresh (a token is renewed after 7 days). Never blocks backups: a failed call is retried later.
             let a3 = agent.clone();
             std::thread::spawn(move || loop {
                 a3.licensing.refresh(backer_agent::now_ts().as_second());
                 std::thread::sleep(Duration::from_secs(30 * 60));
             });
+
             // Wall-clock based, so a sleep/wake gap simply makes the next tick catch up.
             while !agent.quit_requested() {
-                let _ = agent.tick(backer_agent::now_ts());
+                match agent.tick(backer_agent::now_ts()) {
+                    // Log a repeating error once, not every half minute.
+                    Err(e) if e.to_string() != last_err => { last_err = e.to_string(); log.line(&format!("scheduler error: {e:#}")); }
+                    Ok(_) => last_err.clear(),
+                    _ => {}
+                }
                 // Sleep in short steps so a quit request from the tray is honoured within a second.
                 for _ in 0..60 {
                     if agent.quit_requested() { break; }
@@ -62,6 +83,7 @@ fn main() -> Result<()> {
             }
             // Give cancelled runs a moment to finish their current file, then leave. The next start rebinds the sockets.
             std::thread::sleep(Duration::from_millis(800));
+            log.line("service stopped");
             Ok(())
         }
         other => anyhow::bail!("unknown command {other}"),
