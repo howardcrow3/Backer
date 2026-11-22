@@ -2,11 +2,11 @@
 
 How it works: a buyer pays on the store page (FastSpring or Paddle). The store calls a small key issuer, which
 signs the buyer's email with a private key and returns a key like `BACKER-AEAQC-AAAJ6-…`. The buyer pastes it into
-Settings, License. The app checks the signature with the matching public key, built in, so there is no activation
-server and no network needed. One key covers all 1.x versions. Before a key is entered the app is a full 14-day trial;
+Settings, License. The app checks the signature with the matching public key, built in, then **activates** the key
+online (below). One key covers all 1.x versions and works on 2 computers. Before a key is entered the app is a full 14-day trial;
 after that backups stop, while history, Verify and restore keep working.
 
-Code: `crates/backer-license` (key format and checking), `crates/backer-agent/src/licensing.rs` (trial and state),
+Code: `crates/backer-license` (key format and checking, `activation.rs` for activation tokens), `crates/backer-agent/src/licensing.rs` (trial and state),
 `tools/key-issuer/` (the issuer: `issuer.mjs` core, `lambda.mjs` AWS entry point, `template.yaml` SAM deployment), `crates/backer-license/src/bin/backer-keygen.rs` (the seller's tool).
 
 ## One-time setup
@@ -38,8 +38,29 @@ Code: `crates/backer-license` (key format and checking), `crates/backer-agent/sr
 - Check a key: `backer-keygen check <public-key-hex> <key>`
 - A new major version (2.x) needs keys issued with major 2; change `MAJOR` in `tools/key-issuer/issuer.mjs` at that point.
 
+## Activation: 2 computers per key
+
+Keys are still signed and checkable offline, but a key only counts on 2 computers, so one posted on the internet stops
+working for everyone after the first two. The license service is the `turtlebox-billing` Lambda in howardcrow3/highturtle
+(`billing/src/backer-activation.mjs`, DynamoDB table `highturtle-backer-activations`), reached at
+`https://turtlebox.studio/api/backer/v1/activate` and `/deactivate`. It signs with the same `BACKER_SIGNING_KEY` as the keys.
+
+- **Activate**: entering a key sends it with a fingerprint of the computer (SHA-256 of the OS machine id, see
+  `crates/backer-agent/src/machine.rs`) to the service. The service checks the key's signature, takes a place for that
+  computer (a third computer gets `seats_full`), and returns a signed token bound to that key and computer. Existing
+  0.7.0 keys need no migration: the key's row is made on first activation.
+- **Offline use**: the app checks the token with the built-in public key. A token is good for 90 days and is renewed
+  in the background after 7. A key that could not be confirmed (entered offline, or saved by a version before
+  activation) keeps working for a 14-day grace period while the app keeps trying. Only a definite answer from the service
+  (on 2 other computers, or deactivated) stops backups early, so a service outage never stops a backup.
+- **Free a place**: Settings, License, *Deactivate this computer* (needs the internet), or the buyer signs in at
+  turtlebox.studio/account and chooses *Free this seat* on a computer, or support runs the **Backer seat reset**
+  workflow in howardcrow3/highturtle with the buyer's email.
+- **Revoke** a key (refund, abuse): set `status` to `revoked` on its row in the activation table. The app stops at its
+  next renewal, within 7 days.
+
 ## Honest limits
 
-A key is tied to an email, not a device, so a customer can share it. This is the usual trade-off for a one-time
-purchase without an activation server. Someone determined can also edit their own copy of the app; the check
-deters casual sharing, not a hostile cracker.
+A key is tied to an email and counted per computer, so posting it online stops working after two computers, but a customer can
+still lend it to one friend. Someone determined can also edit their own copy of the app, or copy a key's two
+places to virtual machines with made-up machine ids; the check stops casual sharing, not a hostile cracker.

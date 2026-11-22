@@ -60,6 +60,13 @@ fn main() -> Result<()> {
             let l2 = log.clone();
             std::thread::spawn(move || { if let Err(e) = server::serve_mcp(a2, mcp) { l2.line(&format!("assistant listener stopped: {e}")); } });
             let mut last_err = String::new();
+            // Keeps the license activation fresh (a token is renewed after 7 days). Never blocks backups: a failed call is retried later.
+            let a3 = agent.clone();
+            std::thread::spawn(move || loop {
+                a3.licensing.refresh(backer_agent::now_ts().as_second());
+                std::thread::sleep(Duration::from_secs(30 * 60));
+            });
+
             // Wall-clock based, so a sleep/wake gap simply makes the next tick catch up.
             while !agent.quit_requested() {
                 match agent.tick(backer_agent::now_ts()) {

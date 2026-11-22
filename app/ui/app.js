@@ -64,16 +64,18 @@ async function showLicense() {
   let l; try { l = await call('license_status'); } catch { return; }
   trialIndicator(l);
   let b = $('#lic');
-  const show = l.state === 'expired' || (l.state === 'trial' && l.days_left <= 5);
+  const show = l.state === 'expired' || l.problem || (l.state === 'trial' && l.days_left <= 5) || (l.state === 'grace' && l.days_left <= 7);
   if (!show) { if (b) b.remove(); return; }
   if (!b) { b = document.createElement('div'); b.id = 'lic'; b.className = 'banner'; document.body.prepend(b); }
+  if (l.state === 'grace') { b.innerHTML = `<span>Backer hasn’t been able to confirm your license key online yet. Backups keep running for ${l.days_left} more day${l.days_left === 1 ? '' : 's'}. Connect to the internet to finish.</span> <button data-retry>Try again</button>`; return; }
+  if (l.problem) { b.innerHTML = `<span>${esc(l.problem)} Backups are ${l.state === 'expired' ? 'paused' : 'running only during your free trial'}.</span> <button class="pri" data-retry>Try again</button> <button data-go="settings">License settings</button>`; return; }
   b.innerHTML = `<span>${l.state === 'expired' ? 'Your free trial has ended, so backups are paused. Your backed-up files and history are untouched.' : `Your free trial ends in ${l.days_left} day${l.days_left === 1 ? '' : 's'}.`}</span> <button class="pri" data-buy>Buy Backer</button> <button data-go="settings">Enter a key</button>`;
 }
 
 // Always-visible trial indicator at the bottom of the left navigation. Hidden once a key is entered.
 function trialIndicator(l) {
   const t = $('#trial'); if (!t) return;
-  if (l.state === 'licensed') { t.hidden = true; return; }
+  if (l.state === 'licensed' || l.state === 'grace') { t.hidden = true; return; }
   const ended = l.state === 'expired';
   const text = ended ? 'Trial ended' : `${l.days_left} day${l.days_left === 1 ? '' : 's'} left in trial`;
   t.className = 'trial' + (ended ? ' ended' : l.days_left <= 5 ? ' soon' : '');
@@ -99,11 +101,16 @@ async function showUpdate(force = false) {
 async function appVersion() { try { return await T.app.getVersion(); } catch { return ''; } }
 
 function licenseHtml(l) {
-  const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer.`
+  const has = l.state === 'licensed' || l.state === 'grace';
+  const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer. One key works on 2 computers.`
+    : l.state === 'grace' ? `<span class="pill warn">Confirming</span> Registered to ${esc(l.email)}. Backer couldn’t reach the license server to confirm this computer yet. Backups keep running, and it keeps trying. ${l.days_left} day${l.days_left === 1 ? '' : 's'} left to confirm.`
     : l.state === 'trial' ? `<span class="pill warn">Free trial</span> ${l.days_left} day${l.days_left === 1 ? '' : 's'} left. Everything works during the trial.`
     : `<span class="pill bad-p">Trial ended</span> Backups are paused until you enter a license key. Viewing your history, Verify and restoring still work.`;
-  return `<h2>License</h2><div class="card">${status}</div>
-    ${l.state === 'licensed' ? '' : `<div class="sub">Paste the key from your purchase email.</div>
+  const problem = l.problem ? `<div class="card"><span class="pill bad-p">Key not active</span> ${esc(l.problem)}</div><div class="row"><button class="pri" data-retry>Try again</button></div>` : '';
+  const manage = has ? `<div class="sub">Moving to a new computer? Deactivate this one first, then enter the key on the new one. A computer you can no longer reach can be removed at turtlebox.studio/account.</div>
+    <div class="row">${l.state === 'grace' ? '<button data-retry>Try again</button>' : ''}<button data-deactivate>Deactivate this computer</button></div>` : '';
+  return `<h2>License</h2><div class="card">${status}</div>${problem}${manage}
+    ${has ? '' : `<div class="sub">Paste the key from your purchase email.</div>
     <textarea id="lickey" rows="3" class="mono" style="width:100%" placeholder="BACKER-XXXXX-XXXXX-…"></textarea>
     <div class="row"><button class="pri" data-activate>Activate</button><button data-buy>Buy Backer</button></div>`}`;
 }
@@ -496,7 +503,7 @@ function wizard(suggested = '') {
 }
 
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-excl],[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-buy],[data-install],[data-checkupdate],[data-browse]'); if (!t) return;
+  const t = e.target.closest('[data-excl],[data-run],[data-pause],[data-delete],[data-open],[data-back],[data-test],[data-verify],[data-openrun],[data-back-run],[data-chip],[data-more],[data-export],[data-hist],[data-histmore],[data-approve],[data-revoke],[data-go],[data-activate],[data-retry],[data-deactivate],[data-buy],[data-install],[data-checkupdate],[data-browse]'); if (!t) return;
   e.preventDefault(); const ds = t.dataset;
   if (ds.run) { await call('run_job', { job_id: +ds.run }); }
   else if (ds.pause) { await call(ds.p === 'true' ? 'resume_job' : 'pause_job', { job_id: +ds.pause }); }
@@ -567,8 +574,25 @@ document.addEventListener('click', async e => {
   } else if (ds.buy !== undefined) { try { await T.core.invoke('open_purchase_page'); } catch (e) { toast('Could not open the store page: ' + (e && e.message || e), true); } return; }
   else if (ds.activate !== undefined) {
     const key = ($('#lickey') || {}).value || '';
-    try { await call('set_license_key', { key }); toast('License activated. Thank you!'); }
+    t.disabled = true;
+    try {
+      const r = await call('set_license_key', { key });
+      toast(r && r.state === 'licensed' ? 'License activated. Thank you!' : 'Key saved. Backer will finish activating as soon as it can reach the license server.');
+    }
     catch (e) { toast(e && e.message || String(e), true); }
+    t.disabled = false;
+  }
+  else if (ds.retry !== undefined) {
+    t.disabled = true;
+    try { const r = await call('retry_activation'); toast(r && r.state === 'licensed' ? 'License activated. Thank you!' : 'Checked.'); }
+    catch (e) { toast(e && e.message || String(e), true); }
+    t.disabled = false;
+  }
+  else if (ds.deactivate !== undefined) {
+    t.disabled = true;
+    try { await call('deactivate_license'); toast('This computer is deactivated. You can now use your key on another computer.'); }
+    catch (e) { toast(e && e.message || String(e), true); }
+    t.disabled = false;
   }
   else if (ds.approve) { await call('approve_mcp_client', { identity: ds.approve }); }
   else if (ds.revoke) { await call('revoke_mcp_client', { identity: ds.revoke }); }

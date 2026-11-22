@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
+pub mod machine;
 pub mod nas;
 pub mod notify;
 pub mod restore;
@@ -392,6 +393,8 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "delete_job" => agent.delete_job(need()?, None),
             "license_status" => Ok(agent.licensing.json(now_ts().as_second())),
             "set_license_key" => agent.licensing.set_key(p.get("key").and_then(Value::as_str).unwrap_or(""), now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
+            "deactivate_license" => agent.licensing.deactivate(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
+            "retry_activation" => agent.licensing.retry(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "verify_job" => agent.verify_job(need()?),
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }

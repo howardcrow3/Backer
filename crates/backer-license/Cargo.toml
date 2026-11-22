@@ -12,6 +12,10 @@ issue = []
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 data-encoding = "2"
 getrandom.workspace = true
+sha2 = { version = "0.10", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
 
 [[bin]]
 name = "backer-keygen"
