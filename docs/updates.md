@@ -20,7 +20,7 @@ Code: `app/src-tauri/src/main.rs` (`check_update`, `install_update`), `app/ui/ap
    (`plugins.updater.pubkey`) with the printed public key (safe to commit). Until then the app never checks for updates.
 3. **GitHub secrets** (repository Settings, Secrets and variables, Actions): `TAURI_SIGNING_PRIVATE_KEY` (the private key
    file's contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-4. **Create the AWS hosting**: deploy `tools/update-hosting/template.yaml` with CloudFormation
+4. **Create the AWS hosting.** Easiest: Actions tab, **Update hosting setup (AWS, run by hand)**, Run workflow (needs the temporary `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets; add an optional `REPO_ADMIN_TOKEN` and it also sets the three values below for you; otherwise the run summary lists them). Or by hand: deploy `tools/update-hosting/template.yaml` with CloudFormation
    (`aws cloudformation deploy --template-file tools/update-hosting/template.yaml --stack-name backer-updates --capabilities CAPABILITY_IAM`).
    If the account already has the GitHub OIDC provider, add
    `--parameter-overrides CreateGitHubOidcProvider=false ExistingOidcProviderArn=<arn>`.
@@ -29,9 +29,9 @@ Code: `app/src-tauri/src/main.rs` (`check_update`, `install_update`), `app/ui/ap
    - `BaseUrl` → GitHub repository **variable** `UPDATE_BASE_URL`
    - `RoleArn` → GitHub **secret** `AWS_UPDATE_ROLE_ARN`
    (Optional variable `UPDATE_AWS_REGION` if the stack is not in us-west-2.)
-5. **Set the update address in the app**: in `tauri.conf.json` set `plugins.updater.endpoints` to
+5. **Set the update address**: set the GitHub variable `UPDATE_BASE_URL` (step 4); the release build writes `<BaseUrl>/latest.json` into the app for you. (Setting `plugins.updater.endpoints` to
    `["<BaseUrl>/latest.json"]`. A custom domain such as `updates.yourdomain.com` in front of CloudFront also works and
-   is better long term, because the address is built into every installed copy.
+   is better long term, because the address is built into every installed copy.)
 
 ## Releasing an update
 
@@ -47,6 +47,6 @@ Withdraw a bad release by re-uploading the previous `latest.json` (S3 versioning
 - The first install of each person still comes from the installer. Updates only reach copies that already contain the
   updater and the public key, so the first release carrying this feature has to be installed by hand.
 - Versions must increase (0.5.0 after 0.4.0). The app never downgrades.
-- The Windows installer is not code-signed yet, so Windows may show a SmartScreen warning for the installer and for updates.
+- The Windows installer is not code-signed yet, so Windows may show a SmartScreen warning. Signing is wired up but off; see `windows-signing.md`.
 - Download page links that never change: `<BaseUrl>/download/Backer-macOS-arm64.dmg` and `<BaseUrl>/download/Backer-Windows-x64.msi` (replaced on every release).
 - The macOS update package is the same signed and notarized app as the DMG.

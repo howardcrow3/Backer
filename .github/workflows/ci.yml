@@ -116,6 +116,19 @@ jobs:
           PY
             echo "Building version $V"
           fi
+      - name: Point the updater at the update feed (only when UPDATE_BASE_URL is set)
+        shell: bash
+        env:
+          BASE_URL: ${{ vars.UPDATE_BASE_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then echo "UPDATE_BASE_URL not set; keeping the endpoint in tauri.conf.json"; exit 0; fi
+          python3 - "$BASE_URL" <<'PY'
+          import json, sys
+          p = "app/src-tauri/tauri.conf.json"
+          c = json.load(open(p))
+          c["plugins"]["updater"]["endpoints"] = [sys.argv[1].rstrip("/") + "/latest.json"]
+          json.dump(c, open(p, "w"), indent=2)
+          PY
       - run: cargo build --release -p backer-agent
       - name: Sign and bundle the agent
         run: |
@@ -184,6 +197,19 @@ jobs:
           PY
             echo "Building version $V"
           fi
+      - name: Point the updater at the update feed (only when UPDATE_BASE_URL is set)
+        shell: bash
+        env:
+          BASE_URL: ${{ vars.UPDATE_BASE_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then echo "UPDATE_BASE_URL not set; keeping the endpoint in tauri.conf.json"; exit 0; fi
+          python3 - "$BASE_URL" <<'PY'
+          import json, sys
+          p = "app/src-tauri/tauri.conf.json"
+          c = json.load(open(p))
+          c["plugins"]["updater"]["endpoints"] = [sys.argv[1].rstrip("/") + "/latest.json"]
+          json.dump(c, open(p, "w"), indent=2)
+          PY
       - run: cargo build --release -p backer-agent
       - name: Bundle the agent next to the app
         shell: bash
@@ -199,8 +225,22 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_SIGNING: ${{ vars.WINDOWS_SIGNING }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
           CFG=(); [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && CFG=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          # Windows code signing with Azure Trusted Signing. OFF until the repository variable WINDOWS_SIGNING=true
+          # (set it after Azure identity validation finishes and the secrets below exist). See docs/windows-signing.md.
+          if [ "$WINDOWS_SIGNING" = "true" ]; then
+            cargo install trusted-signing-cli --locked
+            SIGN="trusted-signing-cli -e $AZURE_SIGNING_ENDPOINT -a $AZURE_SIGNING_ACCOUNT -c $AZURE_SIGNING_PROFILE -d Backer %1"
+            CFG+=(--config "{\"bundle\":{\"windows\":{\"signCommand\":\"$SIGN\"}}}")
+          fi
           cargo tauri build "${CFG[@]}" --bundles msi
       - name: Install, launch and uninstall the installer (real install on the runner)
         shell: pwsh

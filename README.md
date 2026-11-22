@@ -19,15 +19,16 @@ Backer is a desktop app for macOS and Windows. You pick the folders, pick a fold
 
 ## Features
 
-- **Backs up to a NAS share.** Any share your operating system can mount as a folder (SMB or NFS) works. Developed against a Synology NAS.
-- **Flexible schedules.** Run on demand, every few hours, daily, or on chosen weekdays. If the computer was asleep or off at the scheduled time, Backer can catch up at the next opportunity.
+- **Backs up to a NAS.** Connect directly over SMB, NFS or SFTP, or use any share your operating system has already mounted as a folder. Developed against a Synology NAS.
+- **Flexible schedules.** Run on demand, every few minutes or hours, daily, on chosen weekdays, or monthly. If the computer was asleep or off at the scheduled time, Backer can catch up at the next opportunity.
 - **Built for big folders.** Designed for well over 100,000 files. Each run compares size and modification time and copies only what changed.
 - **Safe copies.** Each file is written to a temporary file next to its destination, checked with a BLAKE3 checksum, then renamed into place. Leftovers from an interrupted run are cleaned up.
 - **Browse and restore.** Open a job's backup inside the app, tick files or folders, and restore them to where they came from or to another folder. Backer lists any file that already exists and replaces it only if you say so. Restoring only reads the NAS, and still works after the trial ends.
 - **Never deletes without asking.** Files you delete on your computer stay on the NAS and appear under **Deleted files**. Backer removes one from the NAS only after you select it and confirm.
 - **Won't write to the wrong place.** A marker file in the NAS folder proves the share is really mounted, so an unmounted NAS can't fill your local disk.
 - **Clear run summaries.** Every run records what was copied, skipped or couldn't be read, with per-folder numbers, problems grouped by cause, and a searchable file log you can export as CSV.
-- **Options.** Skip files above a size limit. Junk such as `.DS_Store` and `Thumbs.db` is left out automatically.
+- **Options.** Skip files above a size limit, and exclude patterns such as `*.tmp` or `node_modules/`. Junk such as `.DS_Store` and `Thumbs.db` is left out automatically.
+- **Retries.** If the NAS is unreachable, Backer retries and then notifies you.
 - **Lives in the tray.** Closing the window keeps backups running. The tray (menu bar) icon opens the app, runs all jobs, or quits and stops backups after asking.
 - **Works with AI assistants.** An optional local [MCP](#connecting-an-ai-assistant-mcp) server lets an assistant you approve check on jobs and start them.
 - **Private.** No account, no cloud service. The app and the service talk to each other only on your computer, and fonts are bundled.
@@ -43,8 +44,8 @@ Backer is a desktop app for macOS and Windows. You pick the folders, pick a fold
 
 | System | Supported | Notes |
 |---|---|---|
-| macOS | 13 or later, Apple silicon | `.dmg`. Ad hoc signed, not notarized. The service starts at login as a LaunchAgent. |
-| Windows | 10 and 11, 64-bit | Unsigned installer. The service starts at login as a scheduled task. |
+| macOS | 13 or later, Apple silicon | `.dmg`. Signed with a Developer ID and notarized when the release is built with the Apple secrets; otherwise ad hoc signed. The service starts at login as a LaunchAgent. |
+| Windows | 10 and 11, 64-bit | Per-machine MSI, not yet code signed (see [docs/windows-signing.md](docs/windows-signing.md)). The service starts at login as a scheduled task. |
 | Intel Mac, Linux | Not packaged | The core crates build and are tested on Linux in CI. |
 
 ## Download
@@ -112,4 +113,4 @@ Copy `target/release/backer-agent` next to the app binary (`Contents/MacOS/` on 
 
 Backer is early software. Backing up, scheduling, browse and restore, the deleted-files review, run summaries and the tray work on macOS and Windows.
 
-Not built yet: an SFTP connector, version history, code signing and notarization, an Intel Mac build, and a log file for the service itself.
+Not built yet: version history, Windows code signing (wired up, waiting on Azure identity validation), an Intel Mac build, and rename detection. SFTP key login is not available on Windows. The service writes its own log to `agent.log` in its data folder (`~/Library/Application Support/Backer` on a Mac, `%LOCALAPPDATA%\Backer` on Windows); see [docs/user-guide.md](docs/user-guide.md).
