@@ -51,12 +51,12 @@ Backer is a desktop app for macOS and Windows. You pick the folders, pick a fold
 ## Download
 
 <!-- latest-build:start -->
-**Latest build: [v0.8.0](https://github.com/howardcrow3/Backer/releases/tag/v0.8.0)** (2026-11-23)
+**Latest build: [v0.8.1](https://github.com/howardcrow3/Backer/releases/tag/v0.8.1)** (2026-11-23)
 
 | Platform | Download |
 |---|---|
-| macOS, Apple silicon | [Backer_0.8.0_aarch64.dmg](https://github.com/howardcrow3/Backer/releases/download/v0.8.0/Backer_0.8.0_aarch64.dmg) |
-| Windows 10/11, 64-bit | [Backer_0.8.0_x64_en-US.msi](https://github.com/howardcrow3/Backer/releases/download/v0.8.0/Backer_0.8.0_x64_en-US.msi) |
+| macOS, Apple silicon | [Backer_0.8.1_aarch64.dmg](https://github.com/howardcrow3/Backer/releases/download/v0.8.1/Backer_0.8.1_aarch64.dmg) |
+| Windows 10/11, 64-bit | [Backer_0.8.1_x64_en-US.msi](https://github.com/howardcrow3/Backer/releases/download/v0.8.1/Backer_0.8.1_x64_en-US.msi) |
 
 The Mac build is ad hoc signed, not notarized: right-click the app, choose Open, then Open again. The Windows MSI is unsigned: if SmartScreen warns, choose More info, then Run anyway. Older builds are on the [releases page](https://github.com/howardcrow3/Backer/releases).
 <!-- latest-build:end -->
