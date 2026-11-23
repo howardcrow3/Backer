@@ -6,6 +6,13 @@ Parameters:
     Type: String
     Default: howardcrow3/Backer
     Description: owner/repo allowed to publish (only its v* tags and manual runs on main).
+  GitHubRepoImmutable:
+    Type: String
+    Default: howardcrow3@154955899/Backer@1418274162
+    Description: >-
+      The same repo in GitHub's immutable form, owner@ownerId/repo@repoId. Repositories that use immutable OIDC
+      subjects (this one does) send this in the token instead of owner/repo. Read it from
+      GET /repos/{owner}/{repo}/actions/oidc/customization/sub (sub_claim_prefix, without the leading "repo:").
   CreateGitHubOidcProvider:
     Type: String
     Default: "true"
@@ -95,10 +102,12 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # Release tags, and manual runs started from main.
+                # Release tags, and manual runs started from main. Both subject forms: by name and immutable (by ID).
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubRepo}:ref:refs/tags/v*"
                   - !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubRepoImmutable}:ref:refs/tags/v*"
+                  - !Sub "repo:${GitHubRepoImmutable}:ref:refs/heads/main"
       Policies:
         - PolicyName: publish-updates
           PolicyDocument:
