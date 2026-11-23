@@ -9,6 +9,7 @@
 //! The key text is `BACKER-` + base32(payload || 64-byte signature), in groups of five characters.
 
 pub mod activation;
+pub mod link;
 
 use data_encoding::BASE32_NOPAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
