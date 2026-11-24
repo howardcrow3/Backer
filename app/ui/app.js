@@ -611,3 +611,5 @@ document.addEventListener('input', e => {
 });
 document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; browse = null; render(); }));
 render(); timer = setInterval(() => { if (!$('#dlg').open && !browse && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);
+// A backer://activate link from the purchase email was opened: the app already tried the key, so say what happened.
+T.event.listen('license-link', e => { toast(e.payload.message, !e.payload.ok); render(); });
