@@ -59,28 +59,8 @@ fn main() -> Result<()> {
             let a2 = agent.clone();
             let l2 = log.clone();
             std::thread::spawn(move || { if let Err(e) = server::serve_mcp(a2, mcp) { l2.line(&format!("assistant listener stopped: {e}")); } });
-            let mut last_err = String::new();
-            // Keeps the license activation fresh (a token is renewed after 7 days). Never blocks backups: a failed call is retried later.
-            let a3 = agent.clone();
-            std::thread::spawn(move || loop {
-                a3.licensing.refresh(backer_agent::now_ts().as_second());
-                std::thread::sleep(Duration::from_secs(30 * 60));
-            });
-
-            // Wall-clock based, so a sleep/wake gap simply makes the next tick catch up.
-            while !agent.quit_requested() {
-                match agent.tick(backer_agent::now_ts()) {
-                    // Log a repeating error once, not every half minute.
-                    Err(e) if e.to_string() != last_err => { last_err = e.to_string(); log.line(&format!("scheduler error: {e:#}")); }
-                    Ok(_) => last_err.clear(),
-                    _ => {}
-                }
-                // Sleep in short steps so a quit request from the tray is honoured within a second.
-                for _ in 0..60 {
-                    if agent.quit_requested() { break; }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
+            backer_agent::service::spawn_license_refresh(&agent);
+            backer_agent::service::run_scheduler(&agent, &log);
             // Give cancelled runs a moment to finish their current file, then leave. The next start rebinds the sockets.
             std::thread::sleep(Duration::from_millis(800));
             log.line("service stopped");

@@ -8,6 +8,10 @@ use std::process::Command;
 
 /// The OS machine id, or None when it can't be read.
 pub fn os_machine_id() -> Option<String> {
+    // The Mac App Store edition counts no computers, and the sandbox would not allow running ioreg.
+    if cfg!(feature = "mas") {
+        return None;
+    }
     let id = read();
     id.map(|s| s.trim().to_string()).filter(|s| s.len() >= 8)
 }

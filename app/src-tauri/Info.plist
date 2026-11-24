@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Shown by macOS the first time Backer connects to a NAS on the local network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Backer connects to your NAS on the local network to copy your files to it.</string>
+</dict>
+</plist>

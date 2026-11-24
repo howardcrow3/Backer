@@ -1,0 +1,24 @@
+{
+  "identifier": "studio.turtlebox.backer",
+  "app": {
+    "security": {
+      "capabilities": ["mas"]
+    }
+  },
+  "bundle": {
+    "category": "public.app-category.utilities",
+    "createUpdaterArtifacts": false,
+    "externalBin": null,
+    "resources": { "privacy/PrivacyInfo.xcprivacy": "PrivacyInfo.xcprivacy" },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": false,
+      "entitlements": "entitlements.mas.plist",
+      "files": { "embedded.provisionprofile": "embedded.provisionprofile" }
+    }
+  },
+  "plugins": {
+    "deep-link": null,
+    "updater": null
+  }
+}

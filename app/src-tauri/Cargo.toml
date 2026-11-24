@@ -9,9 +9,19 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 backer-license = { path = "../../crates/backer-license" }
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+# Mac App Store edition only: the background agent runs inside the app (see src/main.rs).
+backer-agent = { path = "../../crates/backer-agent", features = ["mas"], optional = true }
+jiff = { version = "0.2", optional = true }
+
+[features]
+# Direct download (the default): self-updating, license keys, a separate background agent, backer:// links.
+default = ["direct"]
+direct = ["dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-deep-link"]
+# Mac App Store: build with `--no-default-features --features mas`. See docs/mac-app-store.md.
+mas = ["dep:backer-agent", "dep:jiff"]

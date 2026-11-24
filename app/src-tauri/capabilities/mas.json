@@ -1,0 +1,6 @@
+{
+  "identifier": "mas",
+  "description": "Mac App Store edition: no deep links.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

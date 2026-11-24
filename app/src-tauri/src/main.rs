@@ -1,9 +1,12 @@
 // The tray app. All real work happens in the background agent; this talks to it on a private local connection.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(feature = "direct")]
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+#[cfg(feature = "direct")]
 use std::process::Command;
+#[cfg(feature = "direct")]
 mod deep_link;
 mod tray_dot;
 
@@ -11,11 +14,15 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(feature = "direct")]
 use tauri_plugin_updater::UpdaterExt;
 
+#[cfg(feature = "direct")]
 trait Rw: Read + Write {}
+#[cfg(feature = "direct")]
 impl<T: Read + Write> Rw for T {}
 
+#[cfg(feature = "direct")]
 fn data_dir() -> PathBuf {
     if cfg!(windows) {
         return PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Backer");
@@ -24,6 +31,7 @@ fn data_dir() -> PathBuf {
 }
 
 /// macOS: Unix socket. Windows: 127.0.0.1 port and token read from the endpoint file in the user's profile.
+#[cfg(feature = "direct")]
 fn connect() -> std::io::Result<Box<dyn Rw>> {
     #[cfg(unix)]
     {
@@ -40,6 +48,12 @@ fn connect() -> std::io::Result<Box<dyn Rw>> {
     }
 }
 
+/// Turns the agent's `{"ok":..,"result":..}` answer into a Result.
+fn unwrap_reply(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    if v["ok"] == true { Ok(v["result"].clone()) } else { Err(v["error"].as_str().unwrap_or("failed").to_string()) }
+}
+
+#[cfg(feature = "direct")]
 fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut s = connect().map_err(|e| format!("The background agent is not running ({e})"))?;
     let req = serde_json::json!({ "method": method, "params": params });
@@ -47,7 +61,18 @@ fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, St
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    if v["ok"] == true { Ok(v["result"].clone()) } else { Err(v["error"].as_str().unwrap_or("failed").to_string()) }
+    unwrap_reply(v)
+}
+
+/// Mac App Store edition: the agent lives inside this process, so there is no socket, helper program or LaunchAgent.
+#[cfg(feature = "mas")]
+static AGENT: std::sync::OnceLock<std::sync::Arc<backer_agent::Agent>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "mas")]
+fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let agent = AGENT.get().ok_or("Backer is still starting")?;
+    let req = serde_json::json!({ "method": method, "params": params });
+    unwrap_reply(backer_agent::server::handle_ui_ext(agent, &req))
 }
 
 #[tauri::command]
@@ -71,6 +96,9 @@ async fn save_text_file(app: tauri::AppHandle, name: String, text: String) -> Re
 /// Opens the store's checkout page in the default browser. The address is built into the app, never taken from the page.
 #[tauri::command]
 fn open_purchase_page() -> Result<(), String> {
+    if cfg!(feature = "mas") {
+        return Err("Backer was bought in the Mac App Store.".into());
+    }
     let url = backer_license::PURCHASE_URL.trim();
     if !url.starts_with("https://") {
         return Err("The store address is not set up in this build.".into());
@@ -84,6 +112,13 @@ fn open_purchase_page() -> Result<(), String> {
     r.map(|_| ()).map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "mas")]
+#[tauri::command]
+fn mcp_config() -> Result<String, String> {
+    Err("The MCP server is not part of the Mac App Store edition.".into())
+}
+
+#[cfg(feature = "direct")]
 #[tauri::command]
 fn mcp_config() -> Result<String, String> {
     let exe = agent_exe().ok_or("cannot locate the agent")?;
@@ -92,12 +127,14 @@ fn mcp_config() -> Result<String, String> {
     })).map_err(|e| e.to_string())?)
 }
 
+#[cfg(feature = "direct")]
 fn agent_exe() -> Option<PathBuf> {
     let name = if cfg!(windows) { "backer-agent.exe" } else { "backer-agent" };
     std::env::current_exe().ok()?.parent().map(|d| d.join(name))
 }
 
 /// Install and start the per-user background agent if it is not already answering.
+#[cfg(feature = "direct")]
 fn ensure_agent() {
     if connect().is_ok() {
         return;
@@ -139,6 +176,33 @@ fn ensure_agent() {
     let _ = agent;
 }
 
+/// Mac App Store edition: open the state, then run the scheduler on a thread of this process.
+#[cfg(feature = "mas")]
+fn ensure_agent() {
+    if AGENT.get().is_some() {
+        return;
+    }
+    // The sandbox makes $HOME this app's own container, so this lands inside it.
+    let dir = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/Backer");
+    let _ = std::fs::create_dir_all(&dir);
+    let log = std::sync::Arc::new(backer_agent::svclog::SvcLog::new(&dir));
+    log.line(&format!("starting, version {}, data folder {}", env!("CARGO_PKG_VERSION"), dir.display()));
+    match backer_agent::Agent::new(dir.join("state.sqlite"), jiff::tz::TimeZone::system()) {
+        Ok(agent) => {
+            let _ = AGENT.set(agent.clone());
+            std::thread::spawn(move || backer_agent::service::run_scheduler(&agent, &log));
+        }
+        Err(e) => log.line(&format!("could not open state: {e:#}")),
+    }
+}
+
+/// Stop scheduled backups and let running ones finish their current file.
+#[cfg(feature = "mas")]
+fn stop_service() {
+    let _ = call("quit_agent", serde_json::json!({}));
+    std::thread::sleep(std::time::Duration::from_millis(800));
+}
+
 fn show_main(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_dock_visibility(true);
@@ -159,6 +223,7 @@ fn hide_main(app: &AppHandle) {
 }
 
 /// Ask the agent to stop, wait for it to go, and make sure the OS does not restart it.
+#[cfg(feature = "direct")]
 fn stop_service() {
     let _ = call("quit_agent", serde_json::json!({}));
     for _ in 0..20 {
@@ -202,18 +267,21 @@ fn run_all() {
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "mas", allow(dead_code))]
 struct UpdateInfo {
     version: String,
     current: String,
     notes: Option<String>,
 }
 
+#[cfg(feature = "direct")]
 /// Updates are switched on once tauri.conf.json carries the real updater public key and address.
 fn updater_ready(app: &AppHandle) -> bool {
     app.config().plugins.0.get("updater").and_then(|c| c["pubkey"].as_str()).map(|k| !k.is_empty() && !k.contains("REPLACE")).unwrap_or(false)
 }
 
 /// Ask the update server whether a newer version exists. `None` means up to date (or updates are not set up yet).
+#[cfg(feature = "direct")]
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
     if !updater_ready(&app) {
@@ -225,6 +293,7 @@ async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
 }
 
 /// Download the update, stop the background agent (so its file can be replaced), install, and restart.
+#[cfg(feature = "direct")]
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     let up = app.updater().map_err(|e| e.to_string())?;
@@ -241,17 +310,40 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// Mac App Store edition: the App Store delivers updates, so the app never checks for or installs any itself.
+#[cfg(feature = "mas")]
+#[tauri::command]
+async fn check_update() -> Result<Option<UpdateInfo>, String> {
+    Ok(None)
+}
+
+#[cfg(feature = "mas")]
+#[tauri::command]
+async fn install_update() -> Result<(), String> {
+    Err("Updates come from the Mac App Store.".into())
+}
+
+/// Tells the page which edition it is, so it can leave out what the Mac App Store edition does not have.
+#[tauri::command]
+fn edition() -> &'static str {
+    if cfg!(feature = "mas") { "store" } else { "direct" }
+}
+
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "direct")]
+    let builder = builder
         // Must be the first plugin. A second launch (double-click, Start menu, Dock, login item) does not start
         // another tray icon or window: it asks the running copy to show its window and then exits.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, edition])
         .setup(|app| {
             ensure_agent();
+            #[cfg(feature = "direct")]
             deep_link::setup(app);
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;
             let run = MenuItem::with_id(app, "run_all", "Run all now", true, None::<&str>)?;
