@@ -1,6 +1,9 @@
 // Talks to the background agent through the Tauri command `agent_call`. No business logic lives here.
 const T = window.__TAURI__;
 const call = (method, params = {}) => T.core.invoke('agent_call', { method, params });
+// 'store' in the Mac App Store edition (no license keys, updater or MCP server), otherwise 'direct'.
+let STORE = false;
+const editionReady = T.core.invoke('edition').then(e => { STORE = e === 'store'; }).catch(() => {});
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtTime = s => s ? new Date(s * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
@@ -86,6 +89,7 @@ function trialIndicator(l) {
 // App updates. Checked at most every 6 hours while the window is open; the user decides when to install.
 let lastUpdateCheck = 0, pendingUpdate = null;
 async function checkForUpdate(force = false) {
+  if (STORE) return null;
   if (!force && Date.now() - lastUpdateCheck < 6 * 3600 * 1000) return pendingUpdate;
   lastUpdateCheck = Date.now();
   try { pendingUpdate = await T.core.invoke('check_update'); } catch (e) { if (force) throw e; }
@@ -101,6 +105,7 @@ async function showUpdate(force = false) {
 async function appVersion() { try { return await T.app.getVersion(); } catch { return ''; } }
 
 function licenseHtml(l) {
+  if (l.store) return `<h2>License</h2><div class="card"><span class="pill ok">Purchased</span> Bought in the Mac App Store. Thank you for buying Backer.</div>`;
   const has = l.state === 'licensed' || l.state === 'grace';
   const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer. One key works on 2 computers.`
     : l.state === 'grace' ? `<span class="pill warn">Confirming</span> Registered to ${esc(l.email)}. Backer couldn’t reach the license server to confirm this computer yet. Backups keep running, and it keeps trying. ${l.days_left} day${l.days_left === 1 ? '' : 's'} left to confirm.`
@@ -116,6 +121,7 @@ function licenseHtml(l) {
 }
 
 async function render() {
+  await editionReady;
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
   try {
     $('#agent').textContent = 'Agent running';
@@ -397,6 +403,12 @@ async function runRestore(planId, replace) {
 }
 
 async function renderSettings() {
+  await editionReady;
+  if (STORE) {
+    const lic = await call('license_status');
+    $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>About</h2><div class="card">Backer ${esc(await appVersion())}. Updates come through the Mac App Store.</div>`;
+    return;
+  }
   const clients = await call('list_mcp_clients');
   const cfg = await T.core.invoke('mcp_config').catch(() => '');
   const lic = await call('license_status');

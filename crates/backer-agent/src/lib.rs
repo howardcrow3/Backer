@@ -10,6 +10,7 @@ pub mod restore;
 pub mod retry;
 pub mod secrets;
 pub mod server;
+pub mod service;
 pub mod svclog;
 pub mod platform;
 

@@ -13,7 +13,8 @@ pub struct SystemNotifier;
 
 impl Notifier for SystemNotifier {
     fn notify(&self, title: &str, body: &str) {
-        #[cfg(target_os = "macos")]
+        // The Mac App Store edition cannot run osascript from the sandbox; it needs UserNotifications (next change).
+        #[cfg(all(target_os = "macos", not(feature = "mas")))]
         {
             // Text goes in as arguments, never into the script, so quotes in a job name cannot break it.
             let _ = std::process::Command::new("/usr/bin/osascript")
@@ -30,7 +31,7 @@ impl Notifier for SystemNotifier {
                 .stderr(std::process::Stdio::null())
                 .status();
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(all(target_os = "macos", not(feature = "mas")), target_os = "linux")))]
         let _ = (title, body);
     }
 }

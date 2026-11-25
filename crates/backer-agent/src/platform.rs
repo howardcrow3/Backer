@@ -116,20 +116,25 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// Keep the computer awake while a backup runs. Dropping the guard releases it.
 /// macOS: `caffeinate`. Windows: a thread holding ES_SYSTEM_REQUIRED. Elsewhere: nothing.
 #[cfg(unix)]
-pub struct AwakeGuard(Option<Child>);
+pub struct AwakeGuard(Option<Child>, #[allow(dead_code)] u32);
 #[cfg(windows)]
 pub struct AwakeGuard(Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>);
 
 #[cfg(unix)]
 impl AwakeGuard {
     pub fn new() -> Self {
-        #[cfg(target_os = "macos")]
+        // Mac App Store edition: an IOKit power assertion (what caffeinate -i does), no helper program.
+        #[cfg(all(target_os = "macos", feature = "mas"))]
+        {
+            return Self(None, iokit::prevent_idle_sleep());
+        }
+        #[cfg(all(target_os = "macos", not(feature = "mas")))]
         {
             let child = Command::new("/usr/bin/caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn().ok();
-            return Self(child);
+            return Self(child, 0);
         }
         #[allow(unreachable_code)]
-        Self(None)
+        Self(None, 0)
     }
 }
 #[cfg(unix)]
@@ -139,6 +144,45 @@ impl Drop for AwakeGuard {
             let _ = c.kill();
             let _ = c.wait();
         }
+        #[cfg(all(target_os = "macos", feature = "mas"))]
+        if self.1 != 0 {
+            iokit::release(self.1);
+        }
+    }
+}
+
+/// Power assertions without launching a program (needed inside the App Sandbox).
+#[cfg(all(target_os = "macos", feature = "mas"))]
+mod iokit {
+    use std::os::raw::{c_char, c_void};
+    type CFStringRef = *const c_void;
+    const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
+    const LEVEL_ON: u32 = 255; // kIOPMAssertionLevelOn
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, enc: u32) -> CFStringRef;
+        fn CFRelease(r: *const c_void);
+    }
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPMAssertionCreateWithName(kind: CFStringRef, level: u32, name: CFStringRef, id: *mut u32) -> i32;
+        fn IOPMAssertionRelease(id: u32) -> i32;
+    }
+    /// Stops idle sleep until `release`. Returns 0 when the assertion could not be made.
+    pub fn prevent_idle_sleep() -> u32 {
+        let mut id = 0u32;
+        unsafe {
+            let kind = CFStringCreateWithCString(std::ptr::null(), c"PreventUserIdleSystemSleep".as_ptr(), UTF8);
+            let name = CFStringCreateWithCString(std::ptr::null(), c"Backer is backing up".as_ptr(), UTF8);
+            let r = IOPMAssertionCreateWithName(kind, LEVEL_ON, name, &mut id);
+            CFRelease(kind);
+            CFRelease(name);
+            if r != 0 { return 0; }
+        }
+        id
+    }
+    pub fn release(id: u32) {
+        unsafe { IOPMAssertionRelease(id) };
     }
 }
 

@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// True in the Mac App Store edition (built with the `mas` feature).
+pub const STORE_EDITION: bool = cfg!(feature = "mas");
+const STORE_NO_KEYS: &str = "This copy of Backer was bought in the Mac App Store, so it needs no license key.";
 pub const TRIAL_DAYS: i64 = 14;
 /// How long a key that has not been confirmed online keeps working.
 pub const GRACE_DAYS: i64 = 14;
@@ -176,6 +179,10 @@ impl Licensing {
     }
 
     fn status_locked(&self, s: &mut Saved, now: i64) -> Status {
+        // Mac App Store edition: the app was paid for in the store, so it is always licensed.
+        if STORE_EDITION {
+            return Status::Licensed { email: "the Mac App Store".into() };
+        }
         let effective = now.max(s.last_seen);
         if effective - s.last_seen >= 3600 {
             s.last_seen = effective;
@@ -214,6 +221,9 @@ impl Licensing {
     }
 
     pub fn set_key(&self, key: &str, now: i64) -> Result<Status, String> {
+        if STORE_EDITION {
+            return Err(STORE_NO_KEYS.into());
+        }
         let pk = self.public_key.ok_or_else(|| LicenseError::NotConfigured.to_string())?;
         let lic = verify_with(key, &pk).map_err(|e: LicenseError| e.to_string())?;
         if lic.major < app_major() {
@@ -290,6 +300,9 @@ impl Licensing {
 
     /// The "Try again" button: ask now, and say why if it did not work.
     pub fn retry(&self, now: i64) -> Result<Status, String> {
+        if STORE_EDITION {
+            return Ok(self.status(now));
+        }
         let key = self.saved.lock().unwrap().key.clone().ok_or("There's no license key on this computer.")?;
         match self.try_activate(&key, now) {
             Ok(()) => Ok(self.status(now)),
@@ -301,6 +314,9 @@ impl Licensing {
     /// Frees this computer's place on the key so it can be used on another computer, and removes the key from this one.
     /// Needs the service, because the place is counted there.
     pub fn deactivate(&self, now: i64) -> Result<Status, String> {
+        if STORE_EDITION {
+            return Err(STORE_NO_KEYS.into());
+        }
         let key = self.saved.lock().unwrap().key.clone().ok_or("There's no license key on this computer.")?;
         match self.server.deactivate(&key, &self.machine) {
             Ok(()) | Err(ServerError::Refused(_)) => {}
@@ -326,6 +342,7 @@ impl Licensing {
             _ => None,
         };
         let mut v = match status {
+            Status::Licensed { email } if STORE_EDITION => json!({"state": "licensed", "email": email, "store": true}),
             Status::Licensed { email } => json!({"state": "licensed", "email": email, "purchase_url": purchase_url}),
             Status::Grace { email, days_left } => json!({"state": "grace", "email": email, "days_left": days_left, "purchase_url": purchase_url}),
             Status::Trial { days_left } => json!({"state": "trial", "days_left": days_left, "purchase_url": purchase_url}),
@@ -340,7 +357,27 @@ impl Licensing {
 
 pub const TRIAL_ENDED: &str = "Your 14-day trial has ended. Enter a license key in Settings to keep backing up. Your backups, history, Verify and restore still work.";
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mas"))]
+mod store_tests {
+    use super::*;
+
+    #[test]
+    fn store_edition_is_always_licensed_and_takes_no_keys() {
+        let d = tempfile::tempdir().unwrap();
+        let t = 1_800_000_000;
+        let l = Licensing::load(d.path().join("license.json"), t);
+        // Long after any trial would have ended.
+        let later = t + 400 * DAY;
+        assert!(matches!(l.status(later), Status::Licensed { .. }));
+        assert!(l.may_back_up(later));
+        assert_eq!(l.json(later)["state"], "licensed");
+        assert_eq!(l.json(later)["store"], true);
+        assert!(l.set_key("BACKER-X", later).is_err());
+        assert!(l.deactivate(later).is_err());
+    }
+}
+
+#[cfg(all(test, not(feature = "mas")))]
 mod tests {
     use super::*;
 

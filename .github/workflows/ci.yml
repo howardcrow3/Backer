@@ -55,6 +55,37 @@ jobs:
         run: for c in backer-sftp backer-smb backer-nfs; do echo "== $c"; docker logs $c 2>&1 | tail -50 || true; done
       - run: scripts/nas-test-servers.sh down
         if: always()
+  mas:
+    # Mac App Store edition (see docs/mac-app-store.md). Unsigned build check only: proves the sandboxed flavor
+    # still compiles and bundles. Signing, the installer package and the upload come with the store set-up.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - name: Agent tests and lints for the store edition
+        run: |
+          cargo test -p backer-agent --features mas --lib store_edition
+          cargo clippy -p backer-agent --features mas --all-targets -- -D warnings
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
+      - name: Build the app bundle
+        run: |
+          cd app/src-tauri
+          # The real provisioning profile arrives with the store set-up; an empty stand-in lets the bundle build.
+          : > embedded.provisionprofile
+          APPLE_SIGNING_IDENTITY=- cargo tauri build --config tauri.mas.conf.json --target aarch64-apple-darwin --bundles app -- --no-default-features --features mas
+      - name: Check the bundle
+        run: |
+          APP=$(ls -d app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app target/aarch64-apple-darwin/release/bundle/macos/*.app 2>/dev/null | head -1)
+          test -n "$APP"
+          test ! -e "$APP/Contents/MacOS/backer-agent" || { echo "::error::the store edition must not bundle the helper program"; exit 1; }
+          test -f "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist" | grep -qx studio.turtlebox.backer
+          ! /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP/Contents/Info.plist" 2>/dev/null || { echo "::error::the store edition must not register backer://"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$APP/Contents/Info.plist"
   dmg:
     needs: [test, nas-integration]   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
