@@ -343,7 +343,7 @@ async function renderBrowse() {
   }));
   $('#bclear').onclick = () => { b.picked.clear(); renderBrowse(); };
   $('#borig').onclick = () => planRestore(null);
-  $('#bother').onclick = async () => { const dir = await T.dialog.open({ directory: true }); if (dir) planRestore(dir); };
+  $('#bother').onclick = async () => { const dir = await T.dialog.open({ directory: true }); if (dir) { await T.core.invoke('remember_folders', { paths: [dir] }); planRestore(dir); } };
 }
 
 async function planRestore(target) {
@@ -406,7 +406,11 @@ async function renderSettings() {
   await editionReady;
   if (STORE) {
     const lic = await call('license_status');
-    $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>About</h2><div class="card">Backer ${esc(await appVersion())}. Updates come through the Mac App Store.</div>`;
+    $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>Start at login</h2><div class="card"><label><input type="checkbox" id="loginitem"> Start Backer when I log in</label> <span id="loginnote" class="sub"></span></div><div class="sub">Scheduled backups run while Backer is running in the menu bar.</div><h2>About</h2><div class="card">Backer ${esc(await appVersion())}. Updates come through the Mac App Store.</div>`;
+    const cb = $('#loginitem'), note = $('#loginnote');
+    const show = st => { cb.checked = st === 'on' || st === 'approval'; note.textContent = st === 'approval' ? 'Allow Backer in System Settings, General, Login Items.' : ''; };
+    try { show(await T.core.invoke('login_item')); } catch { cb.disabled = true; }
+    cb.onchange = async () => { try { show(await T.core.invoke('set_login_item', { on: cb.checked })); } catch (e) { cb.checked = !cb.checked; toast(String((e && e.message) || e), true); } };
     return;
   }
   const clients = await call('list_mcp_clients');
@@ -475,9 +479,9 @@ function wizard(suggested = '') {
     $('#cancel', d).onclick = () => d.close();
     if ($('#back', d)) $('#back', d).onclick = () => { read(); step--; error = ''; draw(); };
     $('#next', d).onclick = next;
-    if ($('#add', d)) $('#add', d).onclick = async () => { const p = await T.dialog.open({ directory: true, multiple: true }); if (p) { [].concat(p).forEach(x => !w.folders.includes(x) && w.folders.push(x)); draw(); } };
+    if ($('#add', d)) $('#add', d).onclick = async () => { const p = await T.dialog.open({ directory: true, multiple: true }); if (p) { await T.core.invoke('remember_folders', { paths: [].concat(p) }); [].concat(p).forEach(x => !w.folders.includes(x) && w.folders.push(x)); draw(); } };
     d.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { w.folders.splice(+b.dataset.rm, 1); draw(); });
-    if ($('#pick', d)) $('#pick', d).onclick = async () => { const p = await T.dialog.open({ directory: true, defaultPath: isWin ? undefined : '/Volumes' }); if (p) { w.dest_root = p; draw(); } };
+    if ($('#pick', d)) $('#pick', d).onclick = async () => { const p = await T.dialog.open({ directory: true, defaultPath: isWin ? undefined : '/Volumes' }); if (p) { await T.core.invoke('remember_folders', { paths: [p] }); w.dest_root = p; draw(); } };
     if ($('#sched', d)) $('#sched', d).onchange = e => { read(); w.sched = e.target.value; draw(); };
     if (step === 1) nasStep.bind(w, d, draw);
   };
