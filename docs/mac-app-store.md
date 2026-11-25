@@ -43,3 +43,27 @@ Developer Program enrolment for High Turtle LLC; Apple Distribution and Mac Inst
 provisioning profile for `studio.turtlebox.backer`; an App Store Connect API key; the app record, price, screenshots,
 privacy policy URL, export-compliance and DSA answers. `ITSAppUsesNonExemptEncryption` is deliberately not set in
 Info.plist so App Store Connect asks.
+
+## Signing and TestFlight upload (workflow `mas-testflight`)
+
+Run the **ci** workflow by hand (Actions, Run workflow) with *mas_testflight* ticked. It builds the store edition, signs it
+with the Apple Distribution certificate and the entitlements plus the two identifiers from the provisioning profile, wraps
+it in an installer package, validates it and uploads it to App Store Connect, where it appears in TestFlight. The build
+number is the workflow run number. The package is also kept as a workflow artifact. **This job has not been run yet**:
+expect to fix small things on the first try.
+
+GitHub secrets (Settings, Secrets and variables, Actions):
+
+| Secret | What |
+|---|---|
+| `MAS_APP_CERT_P12` | Apple Distribution certificate with its private key, exported as .p12, base64 (`base64 -i file.p12`) |
+| `MAS_INSTALLER_CERT_P12` | Mac Installer Distribution certificate, same way |
+| `MAS_CERT_PASSWORD` | the password used for both .p12 exports |
+| `MAS_PROVISIONING_PROFILE` | Mac App Store provisioning profile for `studio.turtlebox.backer` (.provisionprofile), base64 |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID` | App Store Connect API key id and issuer id (Users and Access, Integrations) |
+| `ASC_KEY_P8` | the API key file (.p8), base64 |
+
+Apple side, in order: enrol in the Developer Program; register the App ID `studio.turtlebox.backer` (certificates, identifiers
+and profiles); create both certificates from a certificate signing request made in Keychain Access; create the Mac App Store
+Connect provisioning profile for that App ID and certificate; create the app record in App Store Connect with the same bundle ID;
+create the API key (App Manager role is enough).
