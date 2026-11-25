@@ -68,6 +68,10 @@ fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, St
 #[cfg(feature = "mas")]
 static AGENT: std::sync::OnceLock<std::sync::Arc<backer_agent::Agent>> = std::sync::OnceLock::new();
 
+/// Folders the user chose, reopened at every start (the sandbox forgets them otherwise).
+#[cfg(all(feature = "mas", target_os = "macos"))]
+static BOOKMARKS: std::sync::OnceLock<backer_agent::bookmarks::Bookmarks> = std::sync::OnceLock::new();
+
 #[cfg(feature = "mas")]
 fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let agent = AGENT.get().ok_or("Backer is still starting")?;
@@ -187,6 +191,14 @@ fn ensure_agent() {
     let _ = std::fs::create_dir_all(&dir);
     let log = std::sync::Arc::new(backer_agent::svclog::SvcLog::new(&dir));
     log.line(&format!("starting, version {}, data folder {}", env!("CARGO_PKG_VERSION"), dir.display()));
+    // Regain access to the folders chosen in earlier sessions before any backup can start.
+    #[cfg(target_os = "macos")]
+    {
+        let b = BOOKMARKS.get_or_init(|| backer_agent::bookmarks::Bookmarks::load(dir.join("bookmarks.json"), Box::new(backer_agent::native::SystemBookmarks)));
+        for p in b.restore_all() {
+            log.line(&format!("could not reopen the folder {p}; it needs to be chosen again"));
+        }
+    }
     match backer_agent::Agent::new(dir.join("state.sqlite"), jiff::tz::TimeZone::system()) {
         Ok(agent) => {
             let _ = AGENT.set(agent.clone());
@@ -323,6 +335,46 @@ async fn install_update() -> Result<(), String> {
     Err("Updates come from the Mac App Store.".into())
 }
 
+/// Called by the page right after the user picks folders, so the sandbox keeps access to them. Does nothing in the direct edition.
+#[tauri::command]
+fn remember_folders(paths: Vec<String>) -> bool {
+    #[cfg(all(feature = "mas", target_os = "macos"))]
+    if let Some(b) = BOOKMARKS.get() {
+        return paths.iter().fold(true, |ok, p| b.remember(p) && ok);
+    }
+    let _ = paths;
+    true
+}
+
+/// "on", "off", "approval" (waiting for the user in System Settings) or "unsupported".
+#[tauri::command]
+fn login_item() -> &'static str {
+    #[cfg(all(feature = "mas", target_os = "macos"))]
+    return match backer_agent::native::login_item() {
+        backer_agent::native::LoginItem::On => "on",
+        backer_agent::native::LoginItem::Off => "off",
+        backer_agent::native::LoginItem::NeedsApproval => "approval",
+    };
+    #[allow(unreachable_code)]
+    "unsupported"
+}
+
+#[tauri::command]
+fn set_login_item(on: bool) -> Result<&'static str, String> {
+    #[cfg(all(feature = "mas", target_os = "macos"))]
+    {
+        if !backer_agent::native::set_login_item(on) {
+            return Err("macOS would not change the login item. You can change it in System Settings, General, Login Items.".into());
+        }
+        return Ok(login_item());
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = on;
+        Err("Not available in this edition.".into())
+    }
+}
+
 /// Tells the page which edition it is, so it can leave out what the Mac App Store edition does not have.
 #[tauri::command]
 fn edition() -> &'static str {
@@ -340,11 +392,16 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     builder
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, edition])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, edition, remember_folders, login_item, set_login_item])
         .setup(|app| {
             ensure_agent();
             #[cfg(feature = "direct")]
             deep_link::setup(app);
+            // Started by macOS at login: stay in the menu bar with the window hidden.
+            #[cfg(all(feature = "mas", target_os = "macos"))]
+            if backer_agent::native::launched_as_login_item() {
+                hide_main(app.handle());
+            }
             let open = MenuItem::with_id(app, "open", "Open Backer", true, None::<&str>)?;
             let run = MenuItem::with_id(app, "run_all", "Run all now", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Backer and stop backups…", true, None::<&str>)?;

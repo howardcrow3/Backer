@@ -13,12 +13,15 @@ and updated by the App Store. Bundle ID: `studio.turtlebox.backer`.
 | `backer://` links | license activation | not registered |
 | MCP server | opt-in | left out of the first store release |
 | Sleep prevention | `caffeinate` | IOKit power assertion |
-| Notifications | `osascript` | none yet (next change: UserNotifications) |
-| Launch at login | LaunchAgent | not yet (next change: `SMAppService`) |
-| Chosen folders | plain paths | not yet bookmarked (next change: security-scoped bookmarks) |
+| Notifications | `osascript` | UserNotifications |
+| Launch at login | LaunchAgent | `SMAppService` main-app login item, switched on in Settings (starts hidden in the menu bar) |
+| Chosen folders | plain paths | security-scoped bookmarks, saved when the folder is picked and reopened at start (`bookmarks.json`) |
 
-Until those last three are done the store build is **not shippable**: a sandboxed app cannot read a folder it was
-given in an earlier session without a bookmark.
+The system calls live in `crates/backer-agent/native/mas.m` (plain C functions, built only with `mas` on macOS);
+`bookmarks.rs` holds the bookkeeping and is tested everywhere.
+
+Still to do before shipping: signing, the installer package and the TestFlight upload, and trying it on a real Mac
+(sandbox bookmarks, the login item and notification permission cannot be exercised in CI).
 
 ## Building
 

@@ -1,9 +1,12 @@
 //! The background agent: owns schedules, runs jobs, serves the app (ui.sock) and assistants (mcp.sock).
 pub mod approvals;
+pub mod bookmarks;
 pub mod bridge;
 pub mod ipc;
 pub mod licensing;
 pub mod machine;
+#[cfg(all(feature = "mas", target_os = "macos"))]
+pub mod native;
 pub mod nas;
 pub mod notify;
 pub mod restore;
@@ -71,10 +74,13 @@ pub fn now_ts() -> Timestamp {
 
 impl Agent {
     pub fn new(db_path: PathBuf, tz: TimeZone) -> Result<Arc<Self>> {
+        Self::new_with_notifier(db_path, tz, Arc::new(notify::SystemNotifier))
+    }
+    pub fn new_with_notifier(db_path: PathBuf, tz: TimeZone, notifier: Arc<dyn notify::Notifier>) -> Result<Arc<Self>> {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier: Arc::new(notify::SystemNotifier), restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }

@@ -13,7 +13,9 @@ pub struct SystemNotifier;
 
 impl Notifier for SystemNotifier {
     fn notify(&self, title: &str, body: &str) {
-        // The Mac App Store edition cannot run osascript from the sandbox; it needs UserNotifications (next change).
+        // The Mac App Store edition cannot run osascript from the sandbox, so it uses UserNotifications.
+        #[cfg(all(target_os = "macos", feature = "mas"))]
+        crate::native::notify(title, body);
         #[cfg(all(target_os = "macos", not(feature = "mas")))]
         {
             // Text goes in as arguments, never into the script, so quotes in a job name cannot break it.
@@ -31,7 +33,7 @@ impl Notifier for SystemNotifier {
                 .stderr(std::process::Stdio::null())
                 .status();
         }
-        #[cfg(not(any(all(target_os = "macos", not(feature = "mas")), target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = (title, body);
     }
 }
