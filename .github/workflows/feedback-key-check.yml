@@ -1,0 +1,24 @@
+name: Feedback key check (temporary)
+# One-off: proves FEEDBACK_KEY matches the service. Sends a signed request with no rating or
+# message, so the service checks the signature, then refuses the empty feedback. Nothing is stored.
+on:
+  push:
+    branches: [claude/feedback-key-check]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      FEEDBACK_KEY: ${{ secrets.FEEDBACK_KEY }}
+      APP: backer
+    steps:
+      - run: |
+          [ -n "$FEEDBACK_KEY" ] || { echo "::error::FEEDBACK_KEY is not set"; exit 1; }
+          body="{\"app\":\"$APP\"}"
+          ts=$(date +%s)
+          sig=$(printf '%s' "$ts.$body" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$FEEDBACK_KEY" | awk '{print $NF}')
+          code=$(curl -s -o /tmp/out -w '%{http_code}' -X POST https://feedback.turtlebox.studio/v1/feedback \
+            -H 'content-type: application/json' -H "x-ht-app: $APP" -H "x-ht-timestamp: $ts" -H "x-ht-signature: $sig" -d "$body")
+          echo "::notice title=feedback key::$APP answered $code $(cat /tmp/out) (400 'give a rating...' = key accepted; 401 = key wrong)"
+          [ "$code" = 400 ] && grep -q "rating" /tmp/out
