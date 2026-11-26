@@ -88,7 +88,7 @@ dialog::backdrop{background:rgba(28,28,28,.45)}
 dialog h1{font:300 28px/1.15 var(--font-sans);letter-spacing:-.03em;margin:0 0 var(--space-4)}
 label{display:block;color:var(--ink);margin:var(--space-4) 0 var(--space-2)}
 input,select{width:100%;height:44px;border:1px solid var(--border-control);border-radius:0;padding:0 14px;background:var(--paper);color:var(--ink);font:400 15px/1.4 var(--font-sans)}
-input[type=checkbox]{accent-color:var(--ink);width:auto;height:auto}
+input[type=checkbox],input[type=radio]{accent-color:var(--ink);width:auto;height:auto}
 .steps{display:flex;gap:var(--space-4);margin-bottom:var(--space-4);color:var(--body);font-size:11px;line-height:1.4;letter-spacing:.3em;text-transform:uppercase}.steps b{color:var(--ink);font-weight:500;border-bottom:2px solid var(--accent)}
 .err{color:var(--danger);margin-top:var(--space-2);font-weight:500;font-size:13px}
 
@@ -154,3 +154,10 @@ textarea{font:400 14px/1.5 var(--font-sans);padding:12px 14px;border:1px solid v
 .trial button{width:100%}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Send feedback dialog */
+.stars{display:flex;gap:4px;margin:4px 0 var(--space-4)}
+.stars button{height:36px;width:36px;padding:0;font-size:20px;letter-spacing:0;border-color:var(--line);color:var(--line)}
+.stars button.on{color:var(--accent);border-color:var(--accent)}
+.fb-cats{flex-wrap:wrap;margin:4px 0 var(--space-4)}
+.fb-cat{display:flex;align-items:center;gap:6px;cursor:pointer}

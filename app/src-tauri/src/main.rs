@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(feature = "direct")]
 mod deep_link;
+mod feedback;
 mod tray_dot;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -392,7 +393,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     builder
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, edition, remember_folders, login_item, set_login_item])
+        .invoke_handler(tauri::generate_handler![agent_call, mcp_config, save_text_file, open_purchase_page, check_update, install_update, edition, remember_folders, login_item, set_login_item, feedback::feedback_available, feedback::send_feedback])
         .setup(|app| {
             ensure_agent();
             #[cfg(feature = "direct")]

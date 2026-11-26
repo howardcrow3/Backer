@@ -4,7 +4,8 @@
 <dict>
   <key>NSPrivacyTracking</key><false/>
   <key>NSPrivacyTrackingDomains</key><array/>
-  <!-- Backer sends nothing about the user anywhere except the NAS they chose. -->
+  <!-- Backer sends nothing about the user anywhere except the NAS they chose, and feedback the user chooses to write and send
+       from "Send feedback" (optional, user-initiated, so Apple does not count it as collection). -->
   <key>NSPrivacyCollectedDataTypes</key><array/>
   <key>NSPrivacyAccessedAPITypes</key>
   <array>
