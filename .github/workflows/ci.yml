@@ -173,6 +173,8 @@ jobs:
       - run: cd app/src-tauri && cargo test tray_dot
       - name: Build the app (and notarize when signed)
         env:
+          # Signs "Send feedback" requests (feedback.turtlebox.studio). Empty in forks: the form is hidden.
+          FEEDBACK_KEY: ${{ secrets.FEEDBACK_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -254,6 +256,8 @@ jobs:
         shell: bash
         working-directory: app/src-tauri
         env:
+          # Signs "Send feedback" requests (feedback.turtlebox.studio). Empty in forks: the form is hidden.
+          FEEDBACK_KEY: ${{ secrets.FEEDBACK_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           WINDOWS_SIGNING: ${{ vars.WINDOWS_SIGNING }}
