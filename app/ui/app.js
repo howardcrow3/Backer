@@ -625,6 +625,24 @@ document.addEventListener('input', e => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { logState.search = e.target.value.trim(); loadLog(true); }, 250);
 });
+// Account menu (bottom of the sidebar): Settings, Send feedback and the theme. The theme is stored on this computer only.
+const THEME_KEY = 'backer-theme';
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  document.querySelectorAll('[data-theme-set]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.themeSet === (t || 'system'))));
+}
+let savedTheme = 'system'; try { savedTheme = localStorage.getItem(THEME_KEY) || 'system'; } catch {}
+applyTheme(savedTheme);
+const menu = $('#menu'), acct = $('#acct');
+const setMenu = open => { menu.hidden = !open; acct.setAttribute('aria-expanded', String(open)); };
+acct.addEventListener('click', e => { e.stopPropagation(); setMenu(menu.hidden); });
+document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('#menu')) setMenu(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !menu.hidden) { setMenu(false); acct.focus(); } });
+menu.addEventListener('click', e => {
+  const b = e.target.closest('[data-theme-set]');
+  if (b) { applyTheme(b.dataset.themeSet); try { localStorage.setItem(THEME_KEY, b.dataset.themeSet); } catch {} return; }
+  if (e.target.closest('a')) setMenu(false);
+});
 document.querySelectorAll('nav a:not(#fb-nav)').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; browse = null; render(); }));
 render(); timer = setInterval(() => { if (!$('#dlg').open && !browse && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);
 // A backer://activate link from the purchase email was opened: the app already tried the key, so say what happened.

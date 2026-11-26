@@ -4,19 +4,29 @@
 <meta charset="utf-8">
 <title>Backer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="turtlebox-ui/tokens.css">
+<link rel="stylesheet" href="turtlebox-ui/base.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="app">
   <nav aria-label="Sections">
     <a class="brand" href="#jobs" data-home aria-label="Backer home"><img src="assets/app-icon.svg" alt=""><span>Backer</span></a>
-    <a href="#jobs" data-v="jobs">Home</a>
+    <a href="#jobs" data-v="jobs">Jobs</a>
     <a href="#deleted" data-v="deleted">Deleted files <span id="badge" class="badge" hidden></span></a>
-    <a href="#settings" data-v="settings">Settings</a>
-    <a href="#feedback" id="fb-nav" hidden>Send feedback</a>
     <div class="grow"></div>
     <div id="trial" class="trial" hidden></div>
-    <div id="agent" class="agent">Checking…</div>
+    <div class="acct-wrap">
+      <div id="menu" class="pop" role="menu" hidden>
+        <a href="#settings" data-v="settings" role="menuitem">Settings</a>
+        <a href="#feedback" id="fb-nav" role="menuitem" hidden>Send feedback</a>
+        <hr>
+        <div class="theme" role="group" aria-label="Theme">
+          <button data-theme-set="system" aria-pressed="true">System</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="dark" aria-pressed="false">Dark</button>
+        </div>
+      </div>
+      <button id="acct" class="acct" aria-haspopup="menu" aria-expanded="false"><span class="av" aria-hidden="true">B</span><span class="who"><span class="n">Backer</span><span class="s" id="agent">Checking…</span></span></button>
+    </div>
   </nav>
   <main id="main"></main>
 </div>
