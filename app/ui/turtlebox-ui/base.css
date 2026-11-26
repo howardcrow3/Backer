@@ -1,0 +1,10 @@
+/* Turtlebox UI base. Inter only, compact sizes. */
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--body);font:400 13px/1.55 var(--sans);letter-spacing:-.005em}
+h1,h2,h3{color:var(--ink);font-family:var(--sans);margin:0;text-wrap:balance}
+h1{font-size:20px;line-height:1.25;font-weight:600;letter-spacing:-.025em}
+h2{font-size:15px;line-height:1.35;font-weight:600;letter-spacing:-.02em}
+h3{font-size:13px;font-weight:600;letter-spacing:-.01em}
+a{color:var(--ink);text-decoration-color:var(--accent);text-underline-offset:3px;text-decoration-thickness:2px}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
