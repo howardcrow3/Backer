@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS deleted (
   job_id INTEGER NOT NULL, dest_path TEXT NOT NULL, size INTEGER NOT NULL, detected INTEGER NOT NULL,
   PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS missed_alerts (job_id INTEGER PRIMARY KEY, alerted INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kept (job_id INTEGER NOT NULL, dest_path TEXT NOT NULL, PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
 ";
 
@@ -139,6 +140,29 @@ impl Store {
     }
     pub fn last_run_started(&self, job_id: JobId) -> Result<Option<i64>> {
         self.conn.query_row("SELECT MAX(started) FROM runs WHERE job_id=?1", [job_id], |r| r.get(0)).map_err(se)
+    }
+    /// When the job last finished a successful run (ok or with warnings), or None if it never has.
+    pub fn last_success(&self, job_id: JobId) -> Result<Option<i64>> {
+        self.conn.query_row("SELECT MAX(COALESCE(finished, started)) FROM runs WHERE job_id=?1 AND status IN ('ok','warnings')", [job_id], |r| r.get(0)).map_err(se)
+    }
+    /// When the job's first run started. The baseline for a job that has never succeeded.
+    pub fn first_run_started(&self, job_id: JobId) -> Result<Option<i64>> {
+        self.conn.query_row("SELECT MIN(started) FROM runs WHERE job_id=?1", [job_id], |r| r.get(0)).map_err(se)
+    }
+    /// When a missed-backup alert was last raised for the job, if one is outstanding.
+    pub fn missed_alert_at(&self, job_id: JobId) -> Result<Option<i64>> {
+        match self.conn.query_row("SELECT alerted FROM missed_alerts WHERE job_id=?1", [job_id], |r| r.get(0)) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(se(e)),
+        }
+    }
+    pub fn set_missed_alert(&self, job_id: JobId, at: Option<i64>) -> Result<()> {
+        match at {
+            Some(t) => self.conn.execute("INSERT INTO missed_alerts(job_id,alerted) VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET alerted=?2", params![job_id, t]),
+            None => self.conn.execute("DELETE FROM missed_alerts WHERE job_id=?1", [job_id]),
+        }.map_err(se)?;
+        Ok(())
     }
     /// Appends one row to a run's log. `seq` must increase within a run so rows read back in the order they happened.
     pub fn log(&self, run: i64, row: &LogRow) -> Result<()> {
@@ -293,7 +317,7 @@ mod tests {
 
     fn job() -> Job {
         Job { id: 0, name: "t".into(), folders: vec![FolderPair { source: abs("/a"), dest: "mac/a".into() }],
-            dest_root: "/Volumes/x".into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
+            dest_root: "/Volumes/x".into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None }
     }
 
     #[test]

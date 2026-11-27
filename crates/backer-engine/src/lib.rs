@@ -476,7 +476,7 @@ mod tests {
         conn.init_marker().unwrap();
         let store = Store::open_memory().unwrap();
         let mut job = Job { id: 0, name: "t".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/Documents".into() }],
-            dest_root: d.path().to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: d.path().to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         store.save_job(&mut job).unwrap();
         Env { dst: d.path().to_path_buf(), _s: s, _d: d, src, store, conn, job }
     }

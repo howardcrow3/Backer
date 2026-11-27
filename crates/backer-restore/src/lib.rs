@@ -439,6 +439,7 @@ mod tests {
             catch_up: true,
             exclude_names: vec![],
             max_file_bytes: None,
+            alert_after_days: None,
         };
         Env { _t: t, src, nas, conn, job }
     }
