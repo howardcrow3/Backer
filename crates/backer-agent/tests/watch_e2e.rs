@@ -98,17 +98,21 @@ fn excluded_files_and_paused_jobs_do_not_start_backups() {
     assert!(t.dst.join("mac/src/real.txt").exists());
     assert!(!t.dst.join("mac/src/scratch.tmp").exists());
 
+    // Let any late reports of the writes above arrive (FSEvents batches them), and back those up.
+    std::thread::sleep(Duration::from_millis(2500));
+    let _ = t.agent.tick(at(60)).unwrap();
+
     // Only excluded files changed: stays quiet.
     fs::write(t.src.join("more.tmp"), b"z").unwrap();
     fs::write(t.src.join("cache/y.bin"), b"z").unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     assert!(!t.agent.change_pending(id));
-    assert!(t.agent.tick(at(90)).unwrap().is_empty());
+    assert!(t.agent.tick(at(200)).unwrap().is_empty());
 
     // Pausing drops the watcher; changes are not tracked until resumed.
     ui(&t.agent, "pause_job", json!({"job_id": id}));
     fs::write(t.src.join("while-paused.txt"), b"p").unwrap();
     std::thread::sleep(Duration::from_millis(1500));
-    assert!(t.agent.tick(at(200)).unwrap().is_empty());
+    assert!(t.agent.tick(at(400)).unwrap().is_empty());
     assert!(!t.agent.change_pending(id));
 }

@@ -30,13 +30,16 @@ impl Watch {
     }
 
     pub fn start(job: &Job, tracker: &Tracker, now: Timestamp) -> Self {
-        let roots: Vec<PathBuf> = sources_of(job).iter().map(PathBuf::from).collect();
+        // The OS may report canonical paths (macOS: /var is /private/var), so match against both spellings.
+        let mut roots: Vec<PathBuf> = sources_of(job).iter().map(PathBuf::from).collect();
+        let canonical: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).filter(|c| !roots.contains(c)).collect();
+        roots.extend(canonical);
         // Validated when the job is saved; an invalid set just means nothing is excluded.
         let set = Arc::new(ExcludeSet::new(&job.exclude_names).unwrap_or_default());
         let roots_arc = Arc::new(roots.clone());
         let mut watchers = Vec::new();
         let mut degraded = false;
-        for root in &roots {
+        for root in roots.iter().take(job.folders.len()) {
             let (t, set, roots, id) = (tracker.clone(), set.clone(), roots_arc.clone(), job.id);
             let handler = move |res: notify::Result<Event>| {
                 if event_matters(&res, &roots, &set) {
