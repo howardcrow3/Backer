@@ -85,7 +85,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction().map_err(se)?;
         tx.execute("DELETE FROM run_log WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
         tx.execute("DELETE FROM run_folders WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
-        for t in ["runs", "files", "deleted", "kept"] {
+        for t in ["runs", "files", "deleted", "kept", "missed_alerts"] {
             tx.execute(&format!("DELETE FROM {t} WHERE job_id=?1"), [id]).map_err(se)?;
         }
         tx.execute("DELETE FROM jobs WHERE id=?1", [id]).map_err(se)?;
