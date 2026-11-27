@@ -28,6 +28,11 @@ test('schedule text for every kind', () => {
   assert.equal(schedText({ kind: 'monthly', day: 31, hour: 23, minute: 30 }), 'Monthly on the 31st (or the last day) at 23:30');
 });
 
+test('schedule text for watched folders', () => {
+  assert.equal(schedText({ kind: 'on_change', quiet_secs: 120 }), 'When files change (after 2 min quiet)');
+  assert.equal(schedText({ kind: 'on_change', quiet_secs: 30 }), 'When files change (after 30 s quiet)');
+});
+
 test('unknown kinds do not crash the job list', () => {
   assert.equal(schedText({ kind: 'something_new' }), 'something_new');
 });
@@ -38,4 +43,6 @@ test('wizard builds the JSON the agent expects', () => {
   assert.deepEqual(wizardSchedule({ ...w, sched: 'monthly' }), { kind: 'monthly', day: 31, hour: 2, minute: 0 });
   assert.deepEqual(wizardSchedule({ ...w, sched: 'weekly' }), { kind: 'weekly', days: [1, 2], hour: 2, minute: 0 });
   assert.deepEqual(wizardSchedule({ ...w, sched: 'manual' }), { kind: 'manual' });
+  assert.deepEqual(wizardSchedule({ ...w, sched: 'on_change', quiet: 0.5 }), { kind: 'on_change', quiet_secs: 30 });
+  assert.deepEqual(wizardSchedule({ ...w, sched: 'on_change', quiet: 2 }), { kind: 'on_change', quiet_secs: 120 });
 });

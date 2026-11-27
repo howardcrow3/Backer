@@ -16,6 +16,7 @@ pub mod server;
 pub mod service;
 pub mod svclog;
 pub mod platform;
+pub mod watch;
 
 use jiff::{tz::TimeZone, Timestamp};
 use backer_connector::{hostkeys::HostKeys, Access, Destination, Nas};
@@ -32,6 +33,8 @@ use std::sync::{Arc, Mutex};
 pub const MAX_CONCURRENT: usize = 2;
 /// Runs whose per-file log is kept for each job. Older runs keep their summary but lose the file rows.
 pub const KEEP_LOG_RUNS: u32 = 30;
+/// A watched job whose run failed waits this long before the next try.
+pub const WATCH_RETRY_SECS: i64 = 15 * 60;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Start {
@@ -66,6 +69,9 @@ pub struct Agent {
     pub secrets: Box<dyn secrets::SecretStore>,
     /// SFTP host keys pinned on first connect.
     pub host_keys: HostKeys,
+    /// Jobs whose folders changed since their last run ("back up when files change").
+    changes: watch::Tracker,
+    watchers: Mutex<HashMap<JobId, watch::Watch>>,
 }
 
 pub fn now_ts() -> Timestamp {
@@ -80,7 +86,7 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default(), changes: Default::default(), watchers: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
         Ok(a)
     }
@@ -94,7 +100,7 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default(), changes: Default::default(), watchers: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -169,6 +175,10 @@ impl Agent {
                 let reach = retry::wait_until_reachable(&*conn, &me.retry, &cancel);
                 let run = run_job_as(&store, &*conn, &job, now_ts().as_second(), &cancel, &NoProgress, trigger);
                 let _ = store.prune_logs(KEEP_LOG_RUNS);
+                // A watched job whose run failed (NAS away) must not lose its pending changes: try again later.
+                if matches!(job.schedule, Schedule::OnChange { .. }) && run.as_ref().map(|r| r.status == RunStatus::Failed).unwrap_or(true) {
+                    me.changes.lock().unwrap().retry_later(job.id, now_ts().as_second(), WATCH_RETRY_SECS);
+                }
                 if let Some((title, body)) = failure_notice(&job, &reach, run.as_ref().ok(), &me.retry) {
                     me.notifier.notify(&title, &body);
                 }
@@ -224,13 +234,71 @@ impl Agent {
         }
         let store = self.store()?;
         let mut started = vec![];
-        for job in store.list_jobs()? {
+        let jobs = store.list_jobs()?;
+        self.sync_watchers(&jobs, now);
+        for job in jobs {
             let last = store.last_run_started(job.id)?.and_then(|s| Timestamp::from_second(s).ok());
-            if backer_sched::is_due(&job, last, now, &self.tz) && self.start_job_as(job.id, Trigger::Schedule)? != Start::AlreadyRunning {
-                started.push(job.id);
+            // "Back up when files change": the watcher marks the job, a quiet period passes, then it runs.
+            let by_change = match job.schedule {
+                Schedule::OnChange { quiet_secs } if !job.paused => {
+                    // A folder that could not be watched is rescanned every 15 minutes instead.
+                    if self.watchers.lock().unwrap().get(&job.id).map(|w| w.degraded).unwrap_or(false)
+                        && last.map(|l| now.duration_since(l).as_secs() >= WATCH_RETRY_SECS).unwrap_or(true)
+                    {
+                        self.changes.lock().unwrap().mark(job.id, now.as_second());
+                    }
+                    self.changes.lock().unwrap().take_due(job.id, now.as_second(), quiet_secs)
+                }
+                _ => false,
+            };
+            if by_change || backer_sched::is_due(&job, last, now, &self.tz) {
+                match self.start_job_as(job.id, Trigger::Schedule) {
+                    Ok(Start::AlreadyRunning) if by_change => self.changes.lock().unwrap().mark(job.id, now.as_second()),
+                    Ok(Start::AlreadyRunning) => {}
+                    Ok(_) => {
+                        // This run's scan covers everything reported so far.
+                        self.changes.lock().unwrap().forget(job.id);
+                        started.push(job.id);
+                    }
+                    Err(e) => {
+                        if by_change {
+                            self.changes.lock().unwrap().mark(job.id, now.as_second());
+                        }
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(started)
+    }
+
+    /// Keeps one set of file watchers per watched job: starts them for new or edited jobs, drops them for the rest.
+    fn sync_watchers(&self, jobs: &[Job], now: Timestamp) {
+        let mut ws = self.watchers.lock().unwrap();
+        let wanted = |j: &&Job| matches!(j.schedule, Schedule::OnChange { .. }) && !j.paused;
+        let keep: Vec<JobId> = jobs.iter().filter(wanted).map(|j| j.id).collect();
+        let gone: Vec<JobId> = ws.keys().filter(|id| !keep.contains(id)).copied().collect();
+        for id in gone {
+            ws.remove(&id);
+            self.changes.lock().unwrap().forget(id);
+        }
+        for job in jobs.iter().filter(wanted) {
+            if !ws.get(&job.id).map(|w| w.matches(job)).unwrap_or(false) {
+                ws.insert(job.id, watch::Watch::start(job, &self.changes, now));
+            }
+        }
+    }
+
+    /// Test hook: pretend a watched job's folder changed at `now`.
+    #[doc(hidden)]
+    pub fn note_change(&self, id: JobId, now: Timestamp) {
+        self.changes.lock().unwrap().mark(id, now.as_second());
+    }
+
+    /// Test hook: has a watched job's folder changed since its last run started?
+    #[doc(hidden)]
+    pub fn change_pending(&self, id: JobId) -> bool {
+        self.changes.lock().unwrap().is_pending(id)
     }
 
     fn job_json(&self, store: &Store, job: &Job) -> Result<Value> {

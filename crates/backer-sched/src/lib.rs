@@ -1,6 +1,7 @@
 //! Schedule maths in the user's local time zone, DST-safe.
 use jiff::{civil::Date, tz::TimeZone, Span, Timestamp};
-use backer_core::{Job, Schedule};
+use backer_core::{Job, JobId, Schedule};
+use std::collections::HashMap;
 
 /// Slot times on one calendar day. Nonexistent local times (spring forward) shift later; repeated ones (fall back) use the first.
 fn slot_on(tz: &TimeZone, d: Date, h: u8, m: u8) -> Option<Timestamp> {
@@ -77,6 +78,64 @@ pub fn next_run(s: &Schedule, last_start: Option<Timestamp>, now: Timestamp, tz:
     }
 }
 
+/// A watched job still gets a full backup this often, in case events were lost (agent stopped, folder remounted).
+pub const ON_CHANGE_SAFETY_NET_SECS: i64 = 24 * 3600;
+/// However busy a folder is, a watched job backs up at most this long after its first unbacked-up change.
+pub const ON_CHANGE_MAX_WAIT_SECS: i64 = 600;
+
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    first: i64,
+    last: i64,
+    /// Not before this time, whatever else is true (a failed run waits before the next try).
+    not_before: i64,
+}
+
+/// Debounces change reports for watched jobs. Pure bookkeeping (times in epoch seconds), so it is easy to test:
+/// the agent calls `mark` from the file watcher and `take_due` from its tick.
+#[derive(Debug, Default)]
+pub struct ChangeTracker {
+    pending: HashMap<JobId, Pending>,
+}
+
+impl ChangeTracker {
+    /// Something in the job's folders changed, or events can no longer be trusted (overflow, watcher error).
+    pub fn mark(&mut self, job: JobId, now: i64) {
+        self.pending.entry(job).and_modify(|p| p.last = now).or_insert(Pending { first: now, last: now, not_before: 0 });
+    }
+
+    /// A run for this job failed (NAS away): try again, but not before `delay_secs` from now.
+    pub fn retry_later(&mut self, job: JobId, now: i64, delay_secs: i64) {
+        self.mark(job, now);
+        if let Some(p) = self.pending.get_mut(&job) {
+            p.not_before = p.not_before.max(now + delay_secs);
+        }
+    }
+
+    pub fn is_pending(&self, job: JobId) -> bool {
+        self.pending.contains_key(&job)
+    }
+
+    pub fn forget(&mut self, job: JobId) {
+        self.pending.remove(&job);
+    }
+
+    /// True once, when the job has been quiet for `quiet_secs` or its first change is `ON_CHANGE_MAX_WAIT_SECS` old.
+    /// Taking it clears the mark; changes after this point mark the job again.
+    pub fn take_due(&mut self, job: JobId, now: i64, quiet_secs: u32) -> bool {
+        let quiet = quiet_secs as i64;
+        let Some(p) = self.pending.get(&job).copied() else { return false };
+        if now < p.not_before {
+            return false;
+        }
+        if now - p.last >= quiet || now - p.first >= ON_CHANGE_MAX_WAIT_SECS.max(quiet) {
+            self.pending.remove(&job);
+            return true;
+        }
+        false
+    }
+}
+
 /// Should this job start now? Catch-up runs a missed slot once, no matter how many were missed.
 pub fn is_due(job: &Job, last_start: Option<Timestamp>, now: Timestamp, tz: &TimeZone) -> bool {
     if job.paused {
@@ -84,6 +143,9 @@ pub fn is_due(job: &Job, last_start: Option<Timestamp>, now: Timestamp, tz: &Tim
     }
     match &job.schedule {
         Schedule::Manual => false,
+        // Watched jobs run when the watcher reports changes (see `ChangeTracker`). This is the safety net for
+        // changes no event told us about: a first run, and a full scan at least once a day.
+        Schedule::OnChange { .. } => last_start.map(|l| now.duration_since(l).as_secs() >= ON_CHANGE_SAFETY_NET_SECS).unwrap_or(true),
         s if interval(s).is_some() => match last_start {
             None => true,
             Some(l) => l.checked_add(interval(s).unwrap()).map(|n| n <= now).unwrap_or(false),
@@ -190,6 +252,73 @@ mod tests {
             t = t.checked_add(Span::new().seconds(30)).unwrap();
         }
         assert_eq!(runs, 4);
+    }
+
+    #[test]
+    fn on_change_jobs_have_no_slots_but_get_a_daily_safety_net() {
+        let s = Schedule::OnChange { quiet_secs: 60 };
+        let j = job(s.clone());
+        assert_eq!(next_run(&s, Some(ts("2026-10-13T10:00:00Z")), ts("2026-10-13T10:05:00Z"), &tz()), None);
+        assert!(is_due(&j, None, ts("2026-10-13T10:00:00Z"), &tz()));
+        let last = ts("2026-10-13T10:00:00Z");
+        assert!(!is_due(&j, Some(last), ts("2026-10-14T09:59:00Z"), &tz()));
+        assert!(is_due(&j, Some(last), ts("2026-10-14T10:00:00Z"), &tz()));
+        let mut p = j.clone();
+        p.paused = true;
+        assert!(!is_due(&p, None, last, &tz()));
+    }
+
+    #[test]
+    fn change_tracker_waits_for_quiet_then_fires_once() {
+        let mut t = ChangeTracker::default();
+        assert!(!t.take_due(1, 100, 60));
+        t.mark(1, 100);
+        assert!(!t.take_due(1, 159, 60));
+        // More changes push the quiet window out.
+        t.mark(1, 150);
+        assert!(!t.take_due(1, 209, 60));
+        assert!(t.take_due(1, 210, 60));
+        assert!(!t.take_due(1, 300, 60), "fires once");
+        assert!(!t.is_pending(1));
+    }
+
+    #[test]
+    fn change_tracker_never_starves_a_busy_folder() {
+        let mut t = ChangeTracker::default();
+        // A change every 10 s for 20 minutes: the quiet window never elapses, but the cap does.
+        let mut fired = None;
+        for now in (0..1200).step_by(10) {
+            t.mark(1, now);
+            if t.take_due(1, now, 60) {
+                fired = Some(now);
+                break;
+            }
+        }
+        assert_eq!(fired, Some(ON_CHANGE_MAX_WAIT_SECS));
+        // A long quiet window is honoured over the cap.
+        t.mark(2, 0);
+        assert!(!t.take_due(2, ON_CHANGE_MAX_WAIT_SECS, 3600));
+    }
+
+    #[test]
+    fn change_tracker_retry_waits_even_if_quiet() {
+        let mut t = ChangeTracker::default();
+        t.retry_later(1, 100, 900);
+        assert!(!t.take_due(1, 200, 30));
+        t.mark(1, 300); // more changes do not shorten the wait
+        assert!(!t.take_due(1, 999, 30));
+        assert!(t.take_due(1, 1000, 30));
+    }
+
+    #[test]
+    fn change_tracker_keeps_jobs_apart() {
+        let mut t = ChangeTracker::default();
+        t.mark(1, 0);
+        assert!(!t.take_due(2, 1000, 30));
+        assert!(t.take_due(1, 1000, 30));
+        t.mark(2, 5);
+        t.forget(2);
+        assert!(!t.take_due(2, 1000, 30));
     }
 
     #[test]

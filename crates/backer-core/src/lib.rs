@@ -51,11 +51,16 @@ pub enum Schedule {
     Weekly { days: Vec<u8>, hour: u8, minute: u8 },
     /// Local wall-clock time on one day of each month (1..=31). In shorter months it runs on the last day.
     Monthly { day: u8, hour: u8, minute: u8 },
+    /// Whenever files in the source folders change: the agent watches them and backs up once they have been
+    /// quiet for `quiet_secs` (30 to 3600). A full backup also runs when watching cannot be trusted (see backer-agent's `watch`).
+    OnChange { quiet_secs: u32 },
 }
 
 impl Schedule {
     pub const MIN_EVERY_MINUTES: u32 = 5;
     pub const MAX_EVERY_MINUTES: u32 = 1440;
+    pub const MIN_QUIET_SECS: u32 = 30;
+    pub const MAX_QUIET_SECS: u32 = 3600;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +118,9 @@ impl Job {
             }
             Schedule::Monthly { day, .. } if !(1..=31).contains(day) => {
                 return Err(Error::Invalid("day must be 1-31".into()));
+            }
+            Schedule::OnChange { quiet_secs } if !(Schedule::MIN_QUIET_SECS..=Schedule::MAX_QUIET_SECS).contains(quiet_secs) => {
+                return Err(Error::Invalid(format!("wait must be {}-{} seconds", Schedule::MIN_QUIET_SECS, Schedule::MAX_QUIET_SECS)));
             }
             _ => {}
         }
@@ -313,6 +321,10 @@ mod tests {
         assert!(with(Schedule::Monthly { day: 0, hour: 2, minute: 0 }).is_err());
         assert!(with(Schedule::Monthly { day: 32, hour: 2, minute: 0 }).is_err());
         assert!(with(Schedule::Monthly { day: 1, hour: 24, minute: 0 }).is_err());
+        assert!(with(Schedule::OnChange { quiet_secs: 60 }).is_ok());
+        assert!(with(Schedule::OnChange { quiet_secs: 29 }).is_err());
+        assert!(with(Schedule::OnChange { quiet_secs: 3601 }).is_err());
+        assert_eq!(serde_json::to_string(&Schedule::OnChange { quiet_secs: 60 }).unwrap(), r#"{"kind":"on_change","quiet_secs":60}"#);
         // Serde shape the UI and MCP rely on.
         assert_eq!(serde_json::to_string(&Schedule::EveryMinutes { minutes: 15 }).unwrap(), r#"{"kind":"every_minutes","minutes":15}"#);
         assert_eq!(serde_json::to_string(&Schedule::Monthly { day: 1, hour: 2, minute: 30 }).unwrap(), r#"{"kind":"monthly","day":1,"hour":2,"minute":30}"#);

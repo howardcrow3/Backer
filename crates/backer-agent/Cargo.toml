@@ -21,6 +21,8 @@ backer-mcp.workspace = true
 backer-removal.workspace = true
 backer-restore.workspace = true
 backer-license.workspace = true
+# File-system events (FSEvents on macOS, ReadDirectoryChangesW on Windows) for "back up when files change".
+notify = "8"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 serde.workspace = true
 serde_json.workspace = true
