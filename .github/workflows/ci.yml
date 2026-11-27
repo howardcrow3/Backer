@@ -7,6 +7,11 @@ on:
       release_tag:
         description: 'Publish a release with this tag (e.g. v0.1.0); leave empty to only build'
         required: false
+      mas_testflight:
+        description: 'Sign the Mac App Store build and upload it to App Store Connect (TestFlight). Needs the MAS_* and ASC_* secrets (docs/mac-app-store.md)'
+        type: boolean
+        required: false
+        default: false
 jobs:
   test:
     strategy:
@@ -86,6 +91,93 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist" | grep -qx studio.turtlebox.backer
           ! /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP/Contents/Info.plist" 2>/dev/null || { echo "::error::the store edition must not register backer://"; exit 1; }
           /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$APP/Contents/Info.plist"
+  mas-testflight:
+    # Signs the Mac App Store edition, wraps it in an installer package and uploads it to App Store Connect, where it
+    # shows up in TestFlight. Manual: run the workflow with "mas_testflight" ticked. Needs the secrets listed in docs/mac-app-store.md.
+    if: ${{ inputs.mas_testflight }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the secrets exist
+        env:
+          S1: ${{ secrets.MAS_APP_CERT_P12 }}
+          S2: ${{ secrets.MAS_INSTALLER_CERT_P12 }}
+          S3: ${{ secrets.MAS_CERT_PASSWORD }}
+          S4: ${{ secrets.MAS_PROVISIONING_PROFILE }}
+          S5: ${{ secrets.ASC_KEY_ID }}
+          S6: ${{ secrets.ASC_ISSUER_ID }}
+          S7: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          for n in 1 2 3 4 5 6 7; do v="S$n"; [ -n "${!v}" ] || { echo "::error::A MAS_* or ASC_* secret is missing (see docs/mac-app-store.md)"; exit 1; }; done
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: ". -> target\napp/src-tauri -> target" }
+      - run: cargo install tauri-cli --version "^2" --locked
+      - run: cd app/src-tauri && cargo tauri icon ../icon-source.png
+      - name: Install certificates and the provisioning profile
+        env:
+          APP_P12: ${{ secrets.MAS_APP_CERT_P12 }}
+          INST_P12: ${{ secrets.MAS_INSTALLER_CERT_P12 }}
+          CERT_PW: ${{ secrets.MAS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.MAS_PROVISIONING_PROFILE }}
+        run: |
+          KC="$RUNNER_TEMP/mas.keychain-db"; KCPW=$(uuidgen)
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          echo "$APP_P12" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          echo "$INST_P12" | base64 --decode > "$RUNNER_TEMP/inst.p12"
+          security import "$RUNNER_TEMP/app.p12" -P "$CERT_PW" -A -t cert -f pkcs12 -k "$KC"
+          security import "$RUNNER_TEMP/inst.p12" -P "$CERT_PW" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          APP_ID=$(security find-identity -v -p codesigning "$KC" | grep -E "Apple Distribution|3rd Party Mac Developer Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          INST_ID=$(security find-identity -v "$KC" | grep -E "Mac Installer Distribution|3rd Party Mac Developer Installer" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          [ -n "$APP_ID" ] && [ -n "$INST_ID" ] || { echo "::error::could not find both distribution certificates in the keychain"; exit 1; }
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"; echo "INST_ID=$INST_ID" >> "$GITHUB_ENV"
+          echo "$PROFILE" | base64 --decode > app/src-tauri/embedded.provisionprofile
+          security cms -D -i app/src-tauri/embedded.provisionprofile > "$RUNNER_TEMP/profile.plist"
+          TEAM=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.developer.team-identifier" "$RUNNER_TEMP/profile.plist")
+          APPID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.application-identifier" "$RUNNER_TEMP/profile.plist")
+          [ "$APPID" = "$TEAM.studio.turtlebox.backer" ] || { echo "::error::the provisioning profile is for $APPID, not studio.turtlebox.backer"; exit 1; }
+          echo "TEAM=$TEAM" >> "$GITHUB_ENV"
+      - name: Build the app (unsigned; signed next)
+        run: |
+          cd app/src-tauri
+          APPLE_SIGNING_IDENTITY=- cargo tauri build --config tauri.mas.conf.json --target aarch64-apple-darwin --bundles app -- --no-default-features --features mas
+      - name: Sign the app with the store entitlements
+        run: |
+          APP=$(ls -d app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app target/aarch64-apple-darwin/release/bundle/macos/*.app 2>/dev/null | head -1)
+          test -n "$APP"
+          # Each upload needs a higher build number than the last.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$APP/Contents/Info.plist"
+          # The profile's two identifiers go into the entitlements next to the sandbox ones.
+          cp app/src-tauri/entitlements.mas.plist "$RUNNER_TEMP/ent.plist"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $TEAM.studio.turtlebox.backer" "$RUNNER_TEMP/ent.plist"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $TEAM" "$RUNNER_TEMP/ent.plist"
+          cp app/src-tauri/embedded.provisionprofile "$APP/Contents/embedded.provisionprofile"
+          codesign --force --deep --timestamp --sign "$APP_ID" --entitlements "$RUNNER_TEMP/ent.plist" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+      - name: Make the installer package
+        run: |
+          productbuild --component "$APP" /Applications --sign "$INST_ID" "$RUNNER_TEMP/Backer-MacAppStore.pkg"
+          pkgutil --check-signature "$RUNNER_TEMP/Backer-MacAppStore.pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Backer-MacAppStore-pkg
+          path: ${{ runner.temp }}/Backer-MacAppStore.pkg
+      - name: Upload to App Store Connect
+        env:
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+          KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$KEY_P8" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8
+          xcrun altool --validate-app --type macos --file "$RUNNER_TEMP/Backer-MacAppStore.pkg" --apiKey "$KEY_ID" --apiIssuer "$ISSUER"
+          xcrun altool --upload-app --type macos --file "$RUNNER_TEMP/Backer-MacAppStore.pkg" --apiKey "$KEY_ID" --apiIssuer "$ISSUER"
+          rm -f ~/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8
   dmg:
     needs: [test, nas-integration]   # never build an installer from code whose tests fail
     # Apple-silicon .dmg. Signed and notarized when the Apple secrets exist; otherwise ad hoc signed.
