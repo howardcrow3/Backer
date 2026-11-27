@@ -13,6 +13,8 @@ pub struct Feedback {
     message: String,
     category: Option<String>,
     email: Option<String>,
+    #[serde(default)]
+    anonymous: bool,
 }
 
 #[tauri::command]
@@ -24,7 +26,7 @@ pub fn feedback_available() -> bool {
 pub async fn send_feedback(feedback: Feedback) -> Result<serde_json::Value, String> {
     let key = KEY.filter(|k| !k.trim().is_empty()).ok_or("Feedback isn't set up in this build of Backer.")?;
     let platform = if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
-    let payload = body(feedback.rating, &feedback.message, feedback.category.as_deref(), feedback.email.as_deref(), env!("CARGO_PKG_VERSION"), platform)?;
+    let payload = body(feedback.rating, &feedback.message, feedback.category.as_deref(), feedback.email.as_deref(), feedback.anonymous, env!("CARGO_PKG_VERSION"), platform)?;
     tauri::async_runtime::spawn_blocking(move || {
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs() as i64;
         let sig = sign(key, ts, &payload).ok_or("Feedback isn't set up correctly in this build of Backer.")?;
