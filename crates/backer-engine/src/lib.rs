@@ -453,6 +453,8 @@ enum Seen {
     Ok(u64),
     Damaged,
     Missing,
+    /// Its record was removed while the check ran.
+    Forgotten,
 }
 
 /// Re-reads the NAS copy of one file and compares it with the checksum Backer saved when it copied the file.
@@ -486,11 +488,18 @@ pub fn verify_checksums(store: &Store, conn: &dyn Connector, job: &Job, cancel: 
                 return Ok(rep);
             }
             let mut seen = check_copy(conn, &path, &rec);
-            // A backup that replaced this file while we were reading it is not damage: compare with the newest record instead.
-            if matches!(seen, Ok(Seen::Damaged)) {
-                if let Some(newer) = store.get_file(job.id, &path)?.filter(|n| *n != rec) {
-                    seen = check_copy(conn, &path, &newer);
+            // A backup that replaced this file while we were reading it is not damage: compare with the newest record
+            // instead. If the record is gone (the user removed the file on purpose), there is nothing to report.
+            if matches!(seen, Ok(Seen::Damaged) | Ok(Seen::Missing)) {
+                match store.get_file(job.id, &path)? {
+                    None => seen = Ok(Seen::Forgotten),
+                    Some(newer) if newer != rec => seen = check_copy(conn, &path, &newer),
+                    Some(_) => {}
                 }
+            }
+            if matches!(seen, Ok(Seen::Forgotten)) {
+                rep.total = rep.total.saturating_sub(1);
+                continue;
             }
             rep.checked += 1;
             match seen {
@@ -503,6 +512,7 @@ pub fn verify_checksums(store: &Store, conn: &dyn Connector, job: &Job, cancel: 
                     errors_in_a_row = 0;
                     push_capped(&mut rep.damaged, &mut rep.damaged_total, path);
                 }
+                Ok(Seen::Forgotten) => {}
                 Ok(Seen::Missing) => {
                     errors_in_a_row = 0;
                     push_capped(&mut rep.missing, &mut rep.missing_total, path);

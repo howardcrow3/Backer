@@ -25,6 +25,8 @@ struct Active {
 pub struct Integrity {
     /// One check at a time: reading a whole NAS is heavy, so they queue up behind the schedule instead of piling on.
     active: Arc<Mutex<Option<Active>>>,
+    /// Scheduled checks that were due but found the agent busy; they start as soon as it is free.
+    pending: Mutex<std::collections::HashSet<JobId>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -148,15 +150,19 @@ impl Agent {
         for job in store.list_jobs()? {
             let schedule = store.verify_schedule(job.id)?;
             if schedule == Schedule::Manual {
+                self.integrity.pending.lock().unwrap().remove(&job.id);
                 continue;
             }
             let last = store.last_verification_started(job.id)?.and_then(|s| Timestamp::from_second(s).ok());
             // Same slot rules as backups (paused jobs wait, a missed slot is made up once), with the check's own schedule.
             let mut as_job = job.clone();
             as_job.schedule = schedule;
-            if backer_sched::is_due(&as_job, last, now, &self.tz) {
-                // Busy now means it is tried again at the next tick.
-                let _ = self.start_verification(job.id, Trigger::Schedule);
+            let waiting = self.integrity.pending.lock().unwrap().contains(&job.id);
+            if waiting || backer_sched::is_due(&as_job, last, now, &self.tz) {
+                // Busy now means it is kept waiting and tried again at every tick until it can start.
+                let busy = matches!(self.start_verification(job.id, Trigger::Schedule), Ok(VerifyStart::Busy));
+                let mut pending = self.integrity.pending.lock().unwrap();
+                if busy { pending.insert(job.id); } else { pending.remove(&job.id); }
             }
         }
         Ok(())
