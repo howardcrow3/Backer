@@ -245,23 +245,34 @@ impl Agent {
                     if self.watchers.lock().unwrap().get(&job.id).map(|w| w.degraded).unwrap_or(false)
                         && last.map(|l| now.duration_since(l).as_secs() >= WATCH_RETRY_SECS).unwrap_or(true)
                     {
-                        self.changes.lock().unwrap().mark(job.id, now.as_second());
+                        // Only start the quiet window once; marking every tick would keep pushing it out.
+                        let mut ch = self.changes.lock().unwrap();
+                        if !ch.is_pending(job.id) {
+                            ch.mark(job.id, now.as_second());
+                        }
                     }
                     self.changes.lock().unwrap().take_due(job.id, now.as_second(), quiet_secs)
                 }
                 _ => false,
             };
             if by_change || backer_sched::is_due(&job, last, now, &self.tz) {
+                // This run's scan covers everything reported so far. Forget before starting: a run that fails at once
+                // records its own retry, which must not be wiped afterwards.
+                let was_pending = {
+                    let mut ch = self.changes.lock().unwrap();
+                    let p = by_change || ch.is_pending(job.id);
+                    ch.forget(job.id);
+                    p
+                };
                 match self.start_job_as(job.id, Trigger::Schedule) {
-                    Ok(Start::AlreadyRunning) if by_change => self.changes.lock().unwrap().mark(job.id, now.as_second()),
-                    Ok(Start::AlreadyRunning) => {}
-                    Ok(_) => {
-                        // This run's scan covers everything reported so far.
-                        self.changes.lock().unwrap().forget(job.id);
-                        started.push(job.id);
+                    Ok(Start::AlreadyRunning) => {
+                        if was_pending {
+                            self.changes.lock().unwrap().mark(job.id, now.as_second());
+                        }
                     }
+                    Ok(_) => started.push(job.id),
                     Err(e) => {
-                        if by_change {
+                        if was_pending {
                             self.changes.lock().unwrap().mark(job.id, now.as_second());
                         }
                         return Err(e);

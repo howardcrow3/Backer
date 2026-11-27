@@ -11,6 +11,7 @@ use backer_sched::ChangeTracker;
 use jiff::Timestamp;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) type Tracker = Arc<Mutex<ChangeTracker>>;
@@ -21,12 +22,15 @@ pub(crate) struct Watch {
     exclude: Vec<String>,
     /// True when some folder could not be watched (gone, unmounted, system limit): the agent then polls with a full scan.
     pub degraded: bool,
+    /// Set when a watcher reports an error or one of the watched folders itself is removed or unmounted:
+    /// the OS has then dropped the watch, so it is rebuilt on the next tick.
+    dead: Arc<AtomicBool>,
     _watchers: Vec<RecommendedWatcher>,
 }
 
 impl Watch {
     pub fn matches(&self, job: &Job) -> bool {
-        self.sources == sources_of(job) && self.exclude == job.exclude_names
+        !self.dead.load(Ordering::Relaxed) && self.sources == sources_of(job) && self.exclude == job.exclude_names
     }
 
     pub fn start(job: &Job, tracker: &Tracker, now: Timestamp) -> Self {
@@ -39,9 +43,13 @@ impl Watch {
         let roots_arc = Arc::new(roots.clone());
         let mut watchers = Vec::new();
         let mut degraded = false;
+        let dead = Arc::new(AtomicBool::new(false));
         for root in roots.iter().take(job.folders.len()) {
-            let (t, set, roots, id) = (tracker.clone(), set.clone(), roots_arc.clone(), job.id);
+            let (t, set, roots, id, dead) = (tracker.clone(), set.clone(), roots_arc.clone(), job.id, dead.clone());
             let handler = move |res: notify::Result<Event>| {
+                if root_lost(&res, &roots) {
+                    dead.store(true, Ordering::Relaxed);
+                }
                 if event_matters(&res, &roots, &set) {
                     t.lock().unwrap().mark(id, crate::now_ts().as_second());
                 }
@@ -53,7 +61,15 @@ impl Watch {
         }
         // Whatever happened while the agent was not watching is found by a first full scan.
         tracker.lock().unwrap().mark(job.id, now.as_second());
-        Self { sources: sources_of(job), exclude: job.exclude_names.clone(), degraded, _watchers: watchers }
+        Self { sources: sources_of(job), exclude: job.exclude_names.clone(), degraded, dead, _watchers: watchers }
+    }
+}
+
+/// Did the watch itself break (error) or a watched folder go away (removed, renamed, unmounted)?
+fn root_lost(res: &notify::Result<Event>, roots: &[PathBuf]) -> bool {
+    match res {
+        Err(_) => true,
+        Ok(ev) => matches!(ev.kind, EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))) && ev.paths.iter().any(|p| roots.contains(p)),
     }
 }
 
