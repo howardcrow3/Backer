@@ -2,6 +2,7 @@
 pub mod approvals;
 pub mod bookmarks;
 pub mod bridge;
+pub mod integrity;
 pub mod ipc;
 pub mod licensing;
 pub mod machine;
@@ -59,6 +60,7 @@ pub struct Agent {
     new_job_request: Mutex<Option<String>>,
     pub licensing: licensing::Licensing,
     restores: restore::Restores,
+    integrity: integrity::Integrity,
     /// FR-18: how long to wait for an unreachable NAS before a run is marked failed.
     retry: retry::RetryPolicy,
     notifier: Arc<dyn notify::Notifier>,
@@ -80,8 +82,9 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default(), integrity: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
+        a.store()?.recover_interrupted_verifications(now_ts().as_second())?;
         Ok(a)
     }
     /// Test agent: runs synchronously, retries without waiting, shows no notifications.
@@ -94,7 +97,7 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default(), integrity: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -219,6 +222,8 @@ impl Agent {
 
     /// Called every 30 s and after wake. Starts every due job.
     pub fn tick(self: &Arc<Self>, now: Timestamp) -> Result<Vec<JobId>> {
+        // Checking the NAS copies only reads, so it keeps going after the trial ends.
+        self.verify_tick(now)?;
         if !self.licensing.may_back_up(now.as_second()) {
             return Ok(vec![]);
         }
@@ -241,6 +246,7 @@ impl Agent {
         Ok(json!({
             "job": job, "running": self.is_running(job.id), "next_run": next, "last_run": last_run,
             "pending_deleted": store.list_deleted(Some(job.id))?.len(),
+            "integrity": self.integrity_json(store, job)?,
         }))
     }
 
@@ -403,6 +409,11 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "deactivate_license" => agent.licensing.deactivate(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "retry_activation" => agent.licensing.retry(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "verify_job" => agent.verify_job(need()?),
+            "start_verification" => agent.start_verification(need()?, Trigger::Manual).map(|s| json!({"started": s == integrity::VerifyStart::Started})),
+            "verification_status" => Ok(agent.verification_status()),
+            "cancel_verification" => Ok(json!({"cancelled": agent.cancel_verification()})),
+            "list_verifications" => agent.list_verifications(need()?, p.get("limit").and_then(Value::as_u64).unwrap_or(10) as u32),
+            "set_verify_schedule" => serde_json::from_value::<Schedule>(p.get("schedule").cloned().unwrap_or(Value::Null)).map_err(|e| format!("bad schedule: {e}")).and_then(|s| agent.set_verify_schedule(need()?, s)),
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),

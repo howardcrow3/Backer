@@ -18,6 +18,17 @@ under **Deleted files**. Select files and confirm to remove them from the NAS.
 Open the job, choose **Browse backup**, tick files or folders and restore them to the original place or another
 folder. Backer lists files that already exist and replaces them only if you say so. Restore works after the trial ends.
 
+## Check that your backup is intact
+Open the job and use **Backup integrity**. **Check now** reads every file on the NAS back and compares it with the
+checksum Backer saved when it copied the file, so damage the NAS never reported (a failing disk, bit rot, a file
+cut short or removed) shows up. Choose **Every week** or **Every month** under *Check automatically* and Backer does
+it for you at 3 AM, and sends a notification only when it finds a problem. **Details** lists the files affected.
+
+The check only reads. It never copies, repairs or deletes anything on the NAS; you decide what to do with a damaged
+copy. It works after the trial ends. A large backup takes a while because every file is read in full, so Backer runs
+one check at a time and waits while that job is backing up or restoring. (**Verify backup** is a quicker, different
+check: it compares names and sizes with the folders on this computer.)
+
 ## Trial and license
 The trial has every feature for 14 days. After that backups stop; history, Verify and restore keep working. Enter your
 key under Settings. A key covers every 1.x version.

@@ -444,6 +444,91 @@ pub fn verify_job(store: &Store, conn: &dyn Connector, job: &Job, cancel: &Atomi
     Ok(rep)
 }
 
+/// Pages of saved checksums read from the store at a time.
+const CHECKSUM_PAGE: u32 = 500;
+/// A NAS that fails this many files in a row has gone away; the check stops instead of listing every file as unreadable.
+const MAX_CONSECUTIVE_READ_ERRORS: u32 = 5;
+
+enum Seen {
+    Ok(u64),
+    Damaged,
+    Missing,
+}
+
+/// Re-reads the NAS copy of one file and compares it with the checksum Backer saved when it copied the file.
+fn check_copy(conn: &dyn Connector, dest_path: &str, rec: &FileRec) -> Result<Seen> {
+    match conn.stat(dest_path)? {
+        None => Ok(Seen::Missing),
+        Some(st) if st.size != rec.size => Ok(Seen::Damaged),
+        Some(_) => Ok(if conn.hash(dest_path)? == rec.hash { Seen::Ok(rec.size) } else { Seen::Damaged }),
+    }
+}
+
+/// Checks that the copies on the NAS are still intact: reads each one back and compares its BLAKE3 checksum with the
+/// one saved when it was backed up. Only reads the NAS (`stat` and `hash`); it never writes, renames or deletes there,
+/// and it does not need the source folders. `progress` gets (files checked, files in all).
+pub fn verify_checksums(store: &Store, conn: &dyn Connector, job: &Job, cancel: &AtomicBool, progress: &dyn Fn(u64, u64)) -> Result<ChecksumReport> {
+    conn.check_ready()?;
+    let started = Instant::now();
+    let mut rep = ChecksumReport { total: store.count_files(job.id)?, ..Default::default() };
+    progress(0, rep.total);
+    let mut after = String::new();
+    let mut errors_in_a_row = 0u32;
+    let mut since_report = 0u32;
+    loop {
+        let page = store.files_after(job.id, &after, CHECKSUM_PAGE)?;
+        let Some((last, _)) = page.last() else { break };
+        after = last.clone();
+        for (path, rec) in page {
+            if cancel.load(Ordering::Relaxed) {
+                rep.cancelled = true;
+                rep.duration_ms = started.elapsed().as_millis() as u64;
+                return Ok(rep);
+            }
+            let mut seen = check_copy(conn, &path, &rec);
+            // A backup that replaced this file while we were reading it is not damage: compare with the newest record instead.
+            if matches!(seen, Ok(Seen::Damaged)) {
+                if let Some(newer) = store.get_file(job.id, &path)?.filter(|n| *n != rec) {
+                    seen = check_copy(conn, &path, &newer);
+                }
+            }
+            rep.checked += 1;
+            match seen {
+                Ok(Seen::Ok(n)) => {
+                    errors_in_a_row = 0;
+                    rep.ok += 1;
+                    rep.bytes += n;
+                }
+                Ok(Seen::Damaged) => {
+                    errors_in_a_row = 0;
+                    push_capped(&mut rep.damaged, &mut rep.damaged_total, path);
+                }
+                Ok(Seen::Missing) => {
+                    errors_in_a_row = 0;
+                    push_capped(&mut rep.missing, &mut rep.missing_total, path);
+                }
+                // Wrong password, changed host key, NAS not the expected one: nothing more can be checked.
+                Err(e @ (Error::Credentials(_) | Error::HostKey(_) | Error::DestinationNotReady(_) | Error::Cancelled)) => return Err(e),
+                Err(e) => {
+                    errors_in_a_row += 1;
+                    if errors_in_a_row >= MAX_CONSECUTIVE_READ_ERRORS {
+                        return Err(e);
+                    }
+                    push_capped(&mut rep.unreadable, &mut rep.unreadable_total, format!("{path} ({e})"));
+                }
+            }
+            since_report += 1;
+            if since_report == 20 {
+                since_report = 0;
+                progress(rep.checked, rep.total);
+            }
+        }
+    }
+    progress(rep.checked, rep.total);
+    rep.duration_ms = started.elapsed().as_millis() as u64;
+    Ok(rep)
+}
+
 /// Per-file rows written for newly flagged deletions in one folder; the rest are only counted.
 const MAX_FLAG_ROWS: usize = 1000;
 
@@ -802,5 +887,91 @@ mod tests {
             assert_eq!((rep.issues[0].cause.as_str(), rep.issues[0].count), (FOLDER_LOCKED, 2));
             assert_eq!(r.stats.warnings, 2);
         }
+    }
+
+    /// Every file under `dir` with its bytes and modified time, to prove a check changed nothing.
+    fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
+        let mut v: Vec<_> = WalkDir::new(dir).into_iter().flatten().filter(|e| e.file_type().is_file())
+            .map(|e| (e.path().display().to_string(), fs::read(e.path()).unwrap(), e.metadata().unwrap().modified().unwrap())).collect();
+        v.sort();
+        v
+    }
+
+    fn check(e: &Env) -> ChecksumReport {
+        verify_checksums(&e.store, &e.conn, &e.job, &AtomicBool::new(false), &|_, _| {}).unwrap()
+    }
+
+    #[test]
+    fn checksum_check_passes_on_a_clean_backup_and_never_changes_the_nas() {
+        let e = env();
+        fs::write(e.src.join("a.txt"), b"aaa").unwrap();
+        fs::create_dir_all(e.src.join("sub")).unwrap();
+        fs::write(e.src.join("sub/b.txt"), b"bbbb").unwrap();
+        go(&e, 1);
+        let before = snapshot(&e.dst);
+        let r = check(&e);
+        assert_eq!((r.total, r.checked, r.ok, r.bytes, r.problems()), (2, 2, 2, 7, 0));
+        assert_eq!(snapshot(&e.dst), before, "a check only reads");
+    }
+
+    #[test]
+    fn checksum_check_finds_flipped_bytes_truncation_and_missing_files_and_leaves_them_alone() {
+        let e = env();
+        for (n, c) in [("flip", "same-size"), ("short", "will be cut"), ("gone", "bye"), ("fine", "ok")] {
+            fs::write(e.src.join(n), c).unwrap();
+        }
+        go(&e, 1);
+        let d = e.dst.join("mac/Documents");
+        fs::write(d.join("flip"), b"same-sizX").unwrap(); // same length, different contents
+        fs::write(d.join("short"), b"will").unwrap();
+        fs::remove_file(d.join("gone")).unwrap();
+        let before = snapshot(&e.dst);
+        let r = check(&e);
+        assert_eq!((r.ok, r.damaged_total, r.missing_total, r.unreadable_total), (1, 2, 1, 0));
+        assert!(r.damaged.iter().any(|p| p.ends_with("flip")) && r.damaged.iter().any(|p| p.ends_with("short")));
+        assert_eq!(r.missing, vec!["mac/Documents/gone".to_string()]);
+        // Nothing was repaired, replaced or deleted by checking.
+        assert_eq!(snapshot(&e.dst), before);
+        assert!(!d.join("gone").exists());
+    }
+
+    #[test]
+    fn checksum_check_needs_no_source_folder_and_a_changed_source_is_not_damage() {
+        let e = env();
+        fs::write(e.src.join("a.txt"), b"aaa").unwrap();
+        go(&e, 1);
+        fs::write(e.src.join("a.txt"), b"edited since the backup").unwrap();
+        assert_eq!(check(&e).problems(), 0);
+        fs::remove_dir_all(&e.src).unwrap();
+        assert_eq!(check(&e).ok, 1);
+    }
+
+    #[test]
+    fn checksum_check_can_be_stopped_and_refuses_an_unmounted_nas() {
+        let e = env();
+        for i in 0..5 {
+            fs::write(e.src.join(format!("f{i}")), b"x").unwrap();
+        }
+        go(&e, 1);
+        let stop = AtomicBool::new(true);
+        let r = verify_checksums(&e.store, &e.conn, &e.job, &stop, &|_, _| {}).unwrap();
+        assert!(r.cancelled);
+        assert_eq!(r.checked, 0);
+        fs::remove_file(e.dst.join(DEST_MARKER)).unwrap();
+        assert!(verify_checksums(&e.store, &e.conn, &e.job, &AtomicBool::new(false), &|_, _| {}).is_err());
+    }
+
+    #[test]
+    fn checksum_check_pages_through_more_files_than_one_page() {
+        let e = env();
+        let n = CHECKSUM_PAGE as usize + 25;
+        for i in 0..n {
+            fs::write(e.src.join(format!("f{i:04}")), b"x").unwrap();
+        }
+        go(&e, 1);
+        let seen = std::cell::Cell::new((0, 0));
+        let r = verify_checksums(&e.store, &e.conn, &e.job, &AtomicBool::new(false), &|c, t| seen.set((c, t))).unwrap();
+        assert_eq!((r.checked, r.ok), (n as u64, n as u64));
+        assert_eq!(seen.get(), (n as u64, n as u64));
     }
 }
