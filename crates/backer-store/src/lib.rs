@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS deleted (
   PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS missed_alerts (job_id INTEGER PRIMARY KEY, alerted INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kept (job_id INTEGER NOT NULL, dest_path TEXT NOT NULL, PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS verifications (
+  id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, started INTEGER NOT NULL, finished INTEGER,
+  status TEXT NOT NULL, trigger TEXT NOT NULL, report TEXT NOT NULL, message TEXT);
+CREATE INDEX IF NOT EXISTS verifications_job ON verifications(job_id, id);
+CREATE TABLE IF NOT EXISTS verify_schedules (job_id INTEGER PRIMARY KEY, schedule TEXT NOT NULL);
 ";
 
 impl Store {
@@ -85,7 +90,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction().map_err(se)?;
         tx.execute("DELETE FROM run_log WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
         tx.execute("DELETE FROM run_folders WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
-        for t in ["runs", "files", "deleted", "kept", "missed_alerts"] {
+        for t in ["runs", "files", "deleted", "kept", "missed_alerts", "verifications", "verify_schedules"] {
             tx.execute(&format!("DELETE FROM {t} WHERE job_id=?1"), [id]).map_err(se)?;
         }
         tx.execute("DELETE FROM jobs WHERE id=?1", [id]).map_err(se)?;
@@ -236,6 +241,62 @@ impl Store {
     pub fn prune_logs(&self, keep: u32) -> Result<usize> {
         let old = "SELECT id FROM runs r WHERE (SELECT COUNT(*) FROM runs r2 WHERE r2.job_id=r.job_id AND r2.id>r.id) >= ?1 AND status<>'running'";
         self.conn.execute(&format!("DELETE FROM run_log WHERE run_id IN ({old})"), [keep]).map_err(se)
+    }
+
+    // ---- checks of the NAS copies' contents (read-only on the NAS; these rows are local)
+    pub fn begin_verification(&self, job_id: JobId, now: i64, trigger: &str) -> Result<i64> {
+        let empty = serde_json::to_string(&ChecksumReport::default()).map_err(|e| Error::Store(e.to_string()))?;
+        self.conn.execute("INSERT INTO verifications(job_id,started,status,trigger,report) VALUES(?1,?2,'running',?3,?4)", params![job_id, now, trigger, empty]).map_err(se)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+    pub fn finish_verification(&self, id: i64, now: i64, status: VerifyStatus, report: &ChecksumReport, message: Option<&str>) -> Result<()> {
+        let r = serde_json::to_string(report).map_err(|e| Error::Store(e.to_string()))?;
+        self.conn.execute("UPDATE verifications SET finished=?2,status=?3,report=?4,message=?5 WHERE id=?1", params![id, now, status.as_str(), r, message]).map_err(se)?;
+        Ok(())
+    }
+    /// Checks left "running" by a crash are marked failed at startup.
+    pub fn recover_interrupted_verifications(&self, now: i64) -> Result<usize> {
+        self.conn.execute("UPDATE verifications SET status='failed',finished=?1,message='interrupted' WHERE status='running'", [now]).map_err(se)
+    }
+    pub fn list_verifications(&self, job_id: JobId, limit: u32) -> Result<Vec<VerificationSummary>> {
+        let mut st = self.conn.prepare("SELECT id,job_id,started,finished,status,trigger,report,message FROM verifications WHERE job_id=?1 ORDER BY id DESC LIMIT ?2").map_err(se)?;
+        let rows = st.query_map(params![job_id, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?))
+        }).map_err(se)?;
+        let mut out = vec![];
+        for r in rows {
+            let (id, job_id, started, finished, status, trigger, report, message) = r.map_err(se)?;
+            out.push(VerificationSummary { id, job_id, started, finished, status: VerifyStatus::parse(&status).unwrap_or(VerifyStatus::Failed), trigger,
+                report: serde_json::from_str(&report).unwrap_or_default(), message });
+        }
+        Ok(out)
+    }
+    pub fn last_verification_started(&self, job_id: JobId) -> Result<Option<i64>> {
+        self.conn.query_row("SELECT MAX(started) FROM verifications WHERE job_id=?1", [job_id], |r| r.get(0)).map_err(se)
+    }
+    /// Keeps the newest `keep` checks of each job.
+    pub fn prune_verifications(&self, keep: u32) -> Result<usize> {
+        self.conn.execute("DELETE FROM verifications WHERE status<>'running' AND (SELECT COUNT(*) FROM verifications v2 WHERE v2.job_id=verifications.job_id AND v2.id>verifications.id) >= ?1", [keep]).map_err(se)
+    }
+    /// How often a job's NAS copies are checked. `Manual` (the default) means only when the user asks.
+    pub fn verify_schedule(&self, job_id: JobId) -> Result<Schedule> {
+        let s: Option<String> = self.conn.query_row("SELECT schedule FROM verify_schedules WHERE job_id=?1", [job_id], |r| r.get(0)).optional().map_err(se)?;
+        Ok(s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Schedule::Manual))
+    }
+    pub fn set_verify_schedule(&self, job_id: JobId, s: &Schedule) -> Result<()> {
+        let j = serde_json::to_string(s).map_err(|e| Error::Store(e.to_string()))?;
+        self.conn.execute("INSERT INTO verify_schedules VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET schedule=?2", params![job_id, j]).map_err(se)?;
+        Ok(())
+    }
+    /// How many files have a saved checksum.
+    pub fn count_files(&self, job: JobId) -> Result<u64> {
+        self.conn.query_row("SELECT COUNT(*) FROM files WHERE job_id=?1", [job], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(se)
+    }
+    /// The next `limit` recorded files after `after` in path order, for walking a big backup in pages.
+    pub fn files_after(&self, job: JobId, after: &str, limit: u32) -> Result<Vec<(String, FileRec)>> {
+        let mut st = self.conn.prepare("SELECT dest_path,size,mtime,hash FROM files WHERE job_id=?1 AND dest_path>?2 ORDER BY dest_path LIMIT ?3").map_err(se)?;
+        let rows = st.query_map(params![job, after, limit], |r| Ok((r.get::<_, String>(0)?, FileRec { size: r.get::<_, i64>(1)? as u64, mtime: r.get(2)?, hash: r.get(3)? }))).map_err(se)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(se)
     }
 
     // ---- files
