@@ -84,6 +84,26 @@ fn no_alert_when_unconfigured_paused_or_never_run() {
 }
 
 #[test]
+fn resuming_a_long_paused_job_restarts_the_clock() {
+    let (_t, agent, notes, id) = fixture(Some(3));
+    run(&agent, id, T0, RunStatus::Ok);
+    let s = agent.store().unwrap();
+    let mut j = s.get_job(id).unwrap().unwrap();
+    j.paused = true;
+    s.save_job(&mut j).unwrap();
+    agent.check_missed_backups(T0 + DAY).unwrap();
+    agent.check_missed_backups(T0 + 20 * DAY).unwrap(); // still paused: no alert
+    j.paused = false;
+    s.save_job(&mut j).unwrap();
+    agent.check_missed_backups(T0 + 20 * DAY + 60).unwrap();
+    assert!(notes.0.lock().unwrap().is_empty(), "no alert right after resuming");
+    agent.check_missed_backups(T0 + 22 * DAY).unwrap();
+    assert!(notes.0.lock().unwrap().is_empty(), "still within 3 days of the resume");
+    agent.check_missed_backups(T0 + 23 * DAY + 120).unwrap();
+    assert_eq!(notes.0.lock().unwrap().len(), 1, "alerts once 3 days pass after the resume");
+}
+
+#[test]
 fn old_saved_jobs_without_the_field_still_load() {
     let j: Job = serde_json::from_str(r#"{"id":1,"name":"j","folders":[],"dest_root":"x","schedule":{"kind":"manual"},"paused":false,"catch_up":true,"max_file_bytes":null}"#).unwrap();
     assert_eq!(j.alert_after_days, None);
