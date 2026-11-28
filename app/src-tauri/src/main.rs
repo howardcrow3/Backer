@@ -138,13 +138,20 @@ fn agent_exe() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(|d| d.join(name))
 }
 
-/// Install and start the per-user background agent if it is not already answering.
+/// Install and start the per-user background agent if it is not already answering. An agent that is answering but
+/// runs a different program file (left over from an older install, or replaced on disk since it started) is stopped
+/// and started again from this app's copy, so the app never talks to an agent that lacks the calls it needs.
 #[cfg(feature = "direct")]
 fn ensure_agent() {
-    if connect().is_ok() {
-        return;
-    }
     let Some(agent) = agent_exe() else { return };
+    if connect().is_ok() {
+        match call("agent_matches", serde_json::json!({ "exe": agent.display().to_string() })) {
+            Ok(v) if v["current"] == true => return,
+            // Agents from before this check do not know the call: they are the stale ones.
+            Err(e) if !e.starts_with("unknown method") => return,
+            _ => stop_service(),
+        }
+    }
     let _ = std::fs::create_dir_all(data_dir());
     #[cfg(target_os = "macos")]
     {
