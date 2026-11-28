@@ -47,6 +47,7 @@ fn fixture(delay: Duration) -> Fixture {
         catch_up: true,
         exclude_names: vec![],
         max_file_bytes: None,
+        alert_after_days: None,
     };
     let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
     Fixture { _t: t, src, nas, agent, notes, id }

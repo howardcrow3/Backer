@@ -76,6 +76,9 @@ pub struct Job {
     pub exclude_names: Vec<String>,
     /// Files larger than this are skipped with a warning. None = no limit.
     pub max_file_bytes: Option<u64>,
+    /// Alert when this job has gone this many days without a successful backup. None = no alert.
+    #[serde(default)]
+    pub alert_after_days: Option<u32>,
 }
 
 impl Job {
@@ -373,7 +376,7 @@ mod tests {
     use super::*;
     fn job(source: &str, dest: &str) -> Job {
         Job { id: 1, name: "j".into(), folders: vec![FolderPair { source: source.into(), dest: dest.into() }], dest_root: "x".into(),
-            schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
+            schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None }
     }
     #[test]
     fn dest_must_be_forward_slash_relative() {

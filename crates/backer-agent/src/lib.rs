@@ -222,6 +222,8 @@ impl Agent {
 
     /// Called every 30 s and after wake. Starts every due job.
     pub fn tick(self: &Arc<Self>, now: Timestamp) -> Result<Vec<JobId>> {
+        // Before the licence gate: an expired licence is one way a schedule fails silently.
+        let _ = self.check_missed_backups(now.as_second());
         // Checking the NAS copies only reads, so it keeps going after the trial ends.
         self.verify_tick(now)?;
         if !self.licensing.may_back_up(now.as_second()) {
@@ -236,6 +238,32 @@ impl Agent {
             }
         }
         Ok(started)
+    }
+
+    /// Raises a notification for each job that has gone `alert_after_days` without a successful backup.
+    /// Repeats at most once a day until the job succeeds again. Best effort.
+    pub fn check_missed_backups(&self, now: i64) -> Result<()> {
+        let store = self.store()?;
+        for job in store.list_jobs()? {
+            let Some(days) = job.alert_after_days.filter(|d| *d > 0) else { continue };
+            let overdue = !job.paused && missed_since(store.last_success(job.id)?.or(store.first_run_started(job.id)?), now, days);
+            match overdue {
+                false => {
+                    if store.missed_alert_at(job.id)?.is_some() {
+                        store.set_missed_alert(job.id, None)?;
+                    }
+                }
+                true => {
+                    if store.missed_alert_at(job.id)?.is_some_and(|t| now - t < DAY_SECS) {
+                        continue;
+                    }
+                    let (title, body) = missed_notice(&job, store.last_success(job.id)?, now, days);
+                    self.notifier.notify(&title, &body);
+                    store.set_missed_alert(job.id, Some(now))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn job_json(&self, store: &Store, job: &Job) -> Result<Value> {
@@ -285,6 +313,22 @@ impl Agent {
     pub(crate) fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
+}
+
+const DAY_SECS: i64 = 86_400;
+
+/// True when the job is overdue: its last success (or first attempt) is `days` or more in the past.
+fn missed_since(reference: Option<i64>, now: i64, days: u32) -> bool {
+    reference.is_some_and(|r| now - r >= i64::from(days) * DAY_SECS)
+}
+
+fn missed_notice(job: &Job, last_success: Option<i64>, now: i64, days: u32) -> (String, String) {
+    let title = format!("\"{}\" has not backed up", job.name);
+    let body = match last_success {
+        Some(t) => format!("No successful backup in {} days (alert threshold: {days}). Open Backer to see what is wrong.", ((now - t) / DAY_SECS).max(i64::from(days))),
+        None => format!("This job has never completed a successful backup and was first tried over {days} days ago. Open Backer to see what is wrong."),
+    };
+    (title, body)
 }
 
 /// Spec 8.3: a failed run raises a notification by default. A run the user stopped does not.
@@ -492,7 +536,7 @@ mod tests {
         assert_eq!(ui("init_destination", json!({"path": dst})) ["ok"], true);
         assert_eq!(ui("check_destination", json!({"path": dst}))["result"]["ready"], true);
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         T { _t: t, src, dst, agent, id }
     }
@@ -638,7 +682,7 @@ mod tests {
         assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
         ui("init_destination", json!({"path": dst}));
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         // Starting is refused with a message people can act on, from the app and from an assistant alike.
         let msg = ui("run_job", json!({"job_id": id}))["error"].as_str().unwrap().to_string();
@@ -740,7 +784,7 @@ mod restore_tests {
         let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
         ui("init_destination", json!({"path": dst}));
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         agent.start_job(id).unwrap();
         (t, src, agent, id)
