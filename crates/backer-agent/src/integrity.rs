@@ -42,7 +42,7 @@ fn trigger_str(t: Trigger) -> &'static str {
 
 /// Schedules that make sense for reading a whole backup: not every few minutes.
 fn check_schedule(job: &Job, s: &Schedule) -> std::result::Result<(), String> {
-    if matches!(s, Schedule::EveryMinutes { .. }) {
+    if matches!(s, Schedule::EveryMinutes { .. } | Schedule::OnChange { .. }) {
         return Err("Checking file contents reads every file on the NAS, so choose hours, days, weeks or months.".into());
     }
     let mut j = job.clone();

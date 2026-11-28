@@ -55,9 +55,9 @@ pub fn tool_list() -> Value {
             json!({"run_id": {"type":"integer"}, "kind": {"type":"string"}, "search": {"type":"string"}, "offset": {"type":"integer"}, "limit": {"type":"integer"}}), &["run_id"]),
         tool("test_connection", "Check the NAS destination of a job is reachable.", id.clone(), &["job_id"]),
         tool("run_job", "Start a job now.", id.clone(), &["job_id"]),
-        tool("set_schedule", "Change a job's schedule. kind: manual | every_minutes (minutes 5-1440) | every_hours | daily | weekly | monthly (day 1-31; shorter months use their last day).", json!({
-            "job_id": {"type":"integer"}, "kind": {"type":"string", "enum": ["manual","every_hours","daily","weekly"]},
-            "minutes": {"type":"integer"}, "hours": {"type":"integer"}, "day": {"type":"integer", "minimum":1, "maximum":31}, "hour": {"type":"integer"}, "minute": {"type":"integer"},
+        tool("set_schedule", "Change a job's schedule. kind: manual | every_minutes (minutes 5-1440) | every_hours | daily | weekly | monthly (day 1-31; shorter months use their last day) | on_change (back up after files change and stay quiet for quiet_seconds 30-3600).", json!({
+            "job_id": {"type":"integer"}, "kind": {"type":"string", "enum": ["manual","every_minutes","every_hours","daily","weekly","monthly","on_change"]},
+            "minutes": {"type":"integer"}, "quiet_seconds": {"type":"integer", "minimum":30, "maximum":3600}, "hours": {"type":"integer"}, "day": {"type":"integer", "minimum":1, "maximum":31}, "hour": {"type":"integer"}, "minute": {"type":"integer"},
             "days": {"type":"array", "items": {"type":"integer", "minimum":1, "maximum":7}}}), &["job_id","kind"]),
         tool("pause_job", "Pause scheduled runs of a job.", id.clone(), &["job_id"]),
         tool("resume_job", "Resume scheduled runs of a job.", id, &["job_id"]),
@@ -78,6 +78,13 @@ fn parse_schedule(a: &Value) -> Result<Schedule, String> {
                 return Err(format!("minutes must be {}-{}", Schedule::MIN_EVERY_MINUTES, Schedule::MAX_EVERY_MINUTES));
             }
             Ok(Schedule::EveryMinutes { minutes: m as u32 })
+        }
+        Some("on_change") => {
+            let q = n("quiet_seconds").ok_or("quiet_seconds required")?;
+            if !(Schedule::MIN_QUIET_SECS as u64..=Schedule::MAX_QUIET_SECS as u64).contains(&q) {
+                return Err(format!("quiet_seconds must be {}-{}", Schedule::MIN_QUIET_SECS, Schedule::MAX_QUIET_SECS));
+            }
+            Ok(Schedule::OnChange { quiet_secs: q as u32 })
         }
         Some("every_hours") => {
             let h = n("hours").ok_or("hours required")?;
@@ -222,7 +229,11 @@ mod tests {
         assert!(call(json!({"job_id":1,"kind":"monthly","day":31,"hour":4}))["result"].get("isError").is_none());
         assert_eq!(call(json!({"job_id":1,"kind":"monthly","day":0,"hour":4}))["result"]["isError"], true);
         assert_eq!(call(json!({"job_id":1,"kind":"monthly","hour":4}))["result"]["isError"], true);
+        assert!(call(json!({"job_id":1,"kind":"on_change","quiet_seconds":120}))["result"].get("isError").is_none());
+        assert_eq!(call(json!({"job_id":1,"kind":"on_change","quiet_seconds":5}))["result"]["isError"], true);
+        assert_eq!(call(json!({"job_id":1,"kind":"on_change"}))["result"]["isError"], true);
         let log = f.0.lock().unwrap();
+        assert!(log.iter().any(|l| l.contains("OnChange { quiet_secs: 120 }")));
         assert!(log.iter().any(|l| l.contains("EveryMinutes { minutes: 15 }")));
         assert!(log.iter().any(|l| l.contains("Monthly { day: 31, hour: 4, minute: 0 }")));
     }

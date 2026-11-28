@@ -19,7 +19,7 @@ const base = p => p.split(/[\\/]/).filter(Boolean).pop() || 'folder';
 const hhmm = s => `${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`;
 const ordinal = n => n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
 const monthDayText = d => d >= 29 ? `${ordinal(d)} (or the last day)` : ordinal(d);
-const schedText = s => ({ manual: () => 'Run now only', every_minutes: () => `Every ${s.minutes} min`, every_hours: () => `Every ${s.hours} h`, daily: () => `Daily at ${hhmm(s)}`, weekly: () => `Weekly at ${hhmm(s)}`, monthly: () => `Monthly on the ${monthDayText(s.day)} at ${hhmm(s)}` }[s.kind] || (() => s.kind))();
+const schedText = s => ({ manual: () => 'Run now only', every_minutes: () => `Every ${s.minutes} min`, every_hours: () => `Every ${s.hours} h`, daily: () => `Daily at ${hhmm(s)}`, weekly: () => `Weekly at ${hhmm(s)}`, monthly: () => `Monthly on the ${monthDayText(s.day)} at ${hhmm(s)}`, on_change: () => `When files change (after ${s.quiet_secs >= 60 ? `${Math.round(s.quiet_secs / 60)} min` : `${s.quiet_secs} s`} quiet)` }[s.kind] || (() => s.kind))();
 // Exclude patterns are edited one per line. Blank lines are dropped; the agent checks the syntax when the job is saved.
 const parsePatterns = t => String(t || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
 const EXCLUDE_HELP = 'One pattern per line. <span class="mono">*.tmp</span> leaves out matching files anywhere, <span class="mono">node_modules/</span> leaves out every folder with that name and everything in it, and <span class="mono">/build</span> only the one at the top of each backed-up folder. <span class="mono">*</span> stays within a folder, <span class="mono">**</span> crosses folders. Case does not matter. Files already on the NAS are left there.';
@@ -455,9 +455,10 @@ const wizardSchedule = w => ({
   daily: { kind: 'daily', hour: w.hour, minute: w.minute },
   weekly: { kind: 'weekly', days: w.days, hour: w.hour, minute: w.minute },
   monthly: { kind: 'monthly', day: w.mday, hour: w.hour, minute: w.minute },
+  on_change: { kind: 'on_change', quiet_secs: Math.round(w.quiet * 60) },
 }[w.sched]);
 function wizard(suggested = '') {
-  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '', alert_days: '3', excludes: '' };
+  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, quiet: 2, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '', alert_days: '3', excludes: '' };
   const destOf = f => w.dest_base ? `${w.dest_base}/${base(f)}` : base(f);
   let step = 0; const names = ['Folders', 'NAS', 'Schedule', 'Options', 'Review'];
   const d = $('#dlg'); let error = '';
@@ -465,8 +466,9 @@ function wizard(suggested = '') {
     const body = [
       `<h1>Which folders do you want to back up?</h1>${w.folders.map((f, i) => `<div class="card row"><span class="mono" style="flex:1">${esc(f)}</span><button class="link" data-rm="${i}">Remove</button></div>`).join('')}<button id="add">Add folder…</button>`,
       nasStep.html(w),
-      `<h1>When should it run?</h1><label>Schedule</label><select id="sched">${[['manual', 'Only when I click Run now'], ['every_minutes', 'Every few minutes'], ['every_hours', 'Every few hours'], ['daily', 'Every day'], ['weekly', 'Certain days'], ['monthly', 'Once a month']].map(([v, t]) => `<option value="${v}" ${w.sched === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      `<h1>When should it run?</h1><label>Schedule</label><select id="sched">${[['manual', 'Only when I click Run now'], ['every_minutes', 'Every few minutes'], ['every_hours', 'Every few hours'], ['daily', 'Every day'], ['weekly', 'Certain days'], ['monthly', 'Once a month'], ['on_change', 'When files change']].map(([v, t]) => `<option value="${v}" ${w.sched === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
         ${w.sched === 'every_minutes' ? `<label>Minutes</label><input id="minutes" type="number" min="5" max="1440" step="1" value="${w.minutes}"><div class="sub">Between 5 and 1440. Counted from the start of the last backup; a run still in progress is never doubled up.</div>` : ''}
+        ${w.sched === 'on_change' ? `<label>Wait for quiet (minutes)</label><input id="quiet" type="number" min="0.5" max="60" step="0.5" value="${w.quiet}"><div class="sub">Backer watches these folders. After the last change it waits this long, then backs up. If changes keep coming it backs up at least every 10 minutes. It also checks everything once a day in case a change was missed.</div>` : ''}
         ${w.sched === 'monthly' ? `<label>Day of the month</label><input id="mday" type="number" min="1" max="31" value="${w.mday}">${w.mday >= 29 ? '<div class="sub">In months without this day, it runs on the last day of the month.</div>' : ''}` : ''}
         ${w.sched === 'every_hours' ? `<label>Hours</label><input id="hours" type="number" min="1" max="168" value="${w.hours}">` : ''}
         ${['daily', 'weekly', 'monthly'].includes(w.sched) ? `<label>Time</label><input id="time" type="time" value="${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}">` : ''}
@@ -492,6 +494,7 @@ function wizard(suggested = '') {
     if (v('base')) w.dest_base = v('base').value.trim().replace(/^[\\/]+|[\\/]+$/g, '').replace(/\\/g, '/');
     if (v('hours')) w.hours = +v('hours').value;
     if (v('minutes')) w.minutes = +v('minutes').value;
+    if (v('quiet')) w.quiet = +v('quiet').value;
     if (v('mday')) w.mday = +v('mday').value;
     if (v('time')?.value) [w.hour, w.minute] = v('time').value.split(':').map(Number);
     if (d.querySelector('[data-day]')) w.days = [...d.querySelectorAll('[data-day]:checked')].map(c => +c.dataset.day);
@@ -506,6 +509,7 @@ function wizard(suggested = '') {
     if (step === 0 && !w.folders.length) error = 'Add at least one folder.';
     if (step === 1 && !w.dest_root) error = w.nas && w.nas.proto !== 'mounted' ? 'Connect, choose a folder on the NAS and click “Back up into”.' : 'Choose the folder on your NAS.';
     if (step === 2 && w.sched === 'every_minutes' && !(Number.isInteger(w.minutes) && w.minutes >= 5 && w.minutes <= 1440)) error = 'Choose between 5 and 1440 minutes.';
+    if (step === 2 && w.sched === 'on_change' && !(w.quiet >= 0.5 && w.quiet <= 60)) error = 'Choose between 0.5 and 60 minutes.';
     if (step === 2 && w.sched === 'monthly' && !(Number.isInteger(w.mday) && w.mday >= 1 && w.mday <= 31)) error = 'Choose a day from 1 to 31.';
     if (step === 1 && !error) {
       try { const t = await call('check_destination', { path: w.dest_root }); if (!t.ready) { await call('init_destination', { path: w.dest_root }); } } catch (e) { error = String(e); }
