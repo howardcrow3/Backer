@@ -389,13 +389,42 @@ fn edition() -> &'static str {
     if cfg!(feature = "mas") { "store" } else { "direct" }
 }
 
+/// This program file and its modification time when the app started.
+#[cfg(feature = "direct")]
+static STARTED_AS: std::sync::OnceLock<Option<(PathBuf, std::time::SystemTime)>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "direct")]
+fn own_identity() -> Option<(PathBuf, std::time::SystemTime)> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let modified = std::fs::metadata(&exe).ok()?.modified().ok()?;
+    Some((exe, modified))
+}
+
+/// Has a different program file replaced the one this process started from?
+#[cfg(feature = "direct")]
+fn replaced_on_disk() -> bool {
+    match (STARTED_AS.get().cloned().flatten(), own_identity()) {
+        (Some(started), Some(now)) => started != now,
+        _ => false,
+    }
+}
+
 fn main() {
+    #[cfg(feature = "direct")]
+    STARTED_AS.get_or_init(own_identity);
     let builder = tauri::Builder::default();
     #[cfg(feature = "direct")]
     let builder = builder
         // Must be the first plugin. A second launch (double-click, Start menu, Dock, login item) does not start
         // another tray icon or window: it asks the running copy to show its window and then exits.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // If this copy's program file was replaced since it started (a new version installed over it), the running
+        // copy is out of date: restart into the new one, whose start-up also restarts an out-of-date agent.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if replaced_on_disk() {
+                app.restart();
+            }
+            show_main(app)
+        }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
     builder
