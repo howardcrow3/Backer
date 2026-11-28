@@ -81,6 +81,9 @@ pub struct Job {
     pub exclude_names: Vec<String>,
     /// Files larger than this are skipped with a warning. None = no limit.
     pub max_file_bytes: Option<u64>,
+    /// Alert when this job has gone this many days without a successful backup. None = no alert.
+    #[serde(default)]
+    pub alert_after_days: Option<u32>,
 }
 
 impl Job {
@@ -291,6 +294,88 @@ pub struct DeletedFile {
     pub detected: i64,
 }
 
+/// What a check of the NAS copies' contents found. Lists are capped; the `*_total` fields are exact.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecksumReport {
+    /// Files Backer has a saved checksum for.
+    pub total: u64,
+    /// Files looked at (stopping early leaves this below `total`).
+    pub checked: u64,
+    /// NAS copies whose contents match the checksum saved when they were backed up.
+    pub ok: u64,
+    /// Bytes read back from the NAS.
+    pub bytes: u64,
+    /// NAS copies whose size or contents no longer match what was backed up.
+    pub damaged: Vec<String>,
+    pub damaged_total: u64,
+    /// Files Backer backed up that are no longer on the NAS.
+    pub missing: Vec<String>,
+    pub missing_total: u64,
+    /// Files that could not be read from the NAS this time, so they were not checked.
+    pub unreadable: Vec<String>,
+    pub unreadable_total: u64,
+    pub cancelled: bool,
+    pub duration_ms: u64,
+}
+
+impl ChecksumReport {
+    /// Files that are not safely on the NAS.
+    pub fn problems(&self) -> u64 {
+        self.damaged_total + self.missing_total + self.unreadable_total
+    }
+}
+
+/// How a check of the NAS copies ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyStatus {
+    Running,
+    /// Every file matched.
+    Ok,
+    /// Finished, but some files are damaged, missing or could not be read.
+    Problems,
+    /// Could not finish (NAS unreachable, wrong password).
+    Failed,
+    Cancelled,
+}
+
+impl VerifyStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerifyStatus::Running => "running",
+            VerifyStatus::Ok => "ok",
+            VerifyStatus::Problems => "problems",
+            VerifyStatus::Failed => "failed",
+            VerifyStatus::Cancelled => "cancelled",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "running" => VerifyStatus::Running,
+            "ok" => VerifyStatus::Ok,
+            "problems" => VerifyStatus::Problems,
+            "failed" => VerifyStatus::Failed,
+            "cancelled" => VerifyStatus::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// One saved check of a job's NAS copies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationSummary {
+    pub id: i64,
+    pub job_id: JobId,
+    pub started: i64,
+    pub finished: Option<i64>,
+    pub status: VerifyStatus,
+    /// "manual" or "schedule".
+    pub trigger: String,
+    pub report: ChecksumReport,
+    /// Why it could not finish.
+    pub message: Option<String>,
+}
+
 /// Name of the marker file that proves the destination is the real NAS and not an empty mount point.
 pub const DEST_MARKER: &str = ".backer-destination";
 
@@ -299,7 +384,7 @@ mod tests {
     use super::*;
     fn job(source: &str, dest: &str) -> Job {
         Job { id: 1, name: "j".into(), folders: vec![FolderPair { source: source.into(), dest: dest.into() }], dest_root: "x".into(),
-            schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
+            schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None }
     }
     #[test]
     fn dest_must_be_forward_slash_relative() {

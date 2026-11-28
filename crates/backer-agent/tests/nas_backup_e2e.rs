@@ -47,7 +47,7 @@ fn backup_flow(url: &str, password: Option<&str>) {
     assert_eq!(ui(&a, "check_destination", json!({"path": dest}))["ready"], true);
 
     let job = Job { id: 0, name: "NAS job".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/Documents".into() }],
-        dest_root: dest.clone(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+        dest_root: dest.clone(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
     let id = ui(&a, "save_job", json!({"job": job}))["job_id"].as_i64().unwrap();
     assert!(!ui(&a, "get_job", json!({"job_id": id})).to_string().contains(password.unwrap_or("\u{0}")), "no secrets in job JSON");
     assert_eq!(ui(&a, "test_connection", json!({"job_id": id}))["ok"], true);

@@ -181,6 +181,7 @@ async function renderDetail(id) {
     <div class="row"><h1 style="flex:1">${esc(j.job.name)} ${statusPill(j)}</h1><button data-test="${id}">Test NAS</button><button data-verify="${id}">Verify backup</button><button data-browse="${id}">Browse and restore</button><button class="danger-o" data-delete="${id}">Delete job</button><button class="pri" data-run="${id}">Run now</button></div>
     <div class="card"><div class="sub">Folders</div>${j.job.folders.map(f => `<div class="mono">${esc(f.source)} → ${esc(f.dest)}</div>`).join('')}<div class="sub" style="margin-top:8px">Schedule: ${schedText(j.job.schedule)} · Next: ${fmtTime(j.next_run)}</div></div>
     <div class="card"><div class="row"><div class="sub" style="flex:1">Left out</div><button class="link" data-excl="${id}">Edit…</button></div>${(j.job.exclude_names || []).length ? `<div class="mono">${j.job.exclude_names.map(esc).join(' · ')}</div>` : '<div class="dim">Nothing besides system files such as .DS_Store and Thumbs.db.</div>'}</div>
+    ${integrityUi.card(j.integrity, id)}
     ${last ? `<div class="card strip"><div><div class="lbl">Last backup</div><div class="big">${fmtTime(last.started)}</div><div>${resultPill(last)}</div></div><div><div class="lbl">Last ${Math.min(15, runs.length)} runs · taller means more copied</div>${sparkline(runs)}</div></div>` : ''}
     <div class="row" style="margin-top:24px"><h2 style="flex:1;margin:0">Run history</h2><span class="chips"><button class="chip ${histFilter === 'all' ? 'on' : ''}" data-hist="all">All</button><button class="chip ${histFilter === 'attention' ? 'on' : ''}" data-hist="attention">Needs attention</button></span></div>
     ${rr ? `<table class="hist" style="margin-top:8px"><thead><tr><th>Started</th><th class="num">Duration</th><th class="num">Copied</th><th class="num">Size</th><th>Result</th><th></th></tr></thead><tbody>${rr}</tbody></table>` : `<div class="card">${runs.length ? 'No runs needed attention.' : 'No runs yet.'}</div>`}
@@ -457,7 +458,7 @@ const wizardSchedule = w => ({
   on_change: { kind: 'on_change', quiet_secs: Math.round(w.quiet * 60) },
 }[w.sched]);
 function wizard(suggested = '') {
-  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, quiet: 2, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '', excludes: '' };
+  const w = { name: suggested, folders: [], dest_root: '', dest_base: '', sched: 'daily', hour: 2, minute: 0, hours: 6, minutes: 15, quiet: 2, mday: 1, days: [1, 2, 3, 4, 5, 6, 7], catch_up: true, max_gb: '', alert_days: '3', excludes: '' };
   const destOf = f => w.dest_base ? `${w.dest_base}/${base(f)}` : base(f);
   let step = 0; const names = ['Folders', 'NAS', 'Schedule', 'Options', 'Review'];
   const d = $('#dlg'); let error = '';
@@ -473,7 +474,7 @@ function wizard(suggested = '') {
         ${['daily', 'weekly', 'monthly'].includes(w.sched) ? `<label>Time</label><input id="time" type="time" value="${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}">` : ''}
         ${w.sched === 'weekly' ? `<label>Days</label><div class="row">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((n, i) => `<label style="margin:0"><input type="checkbox" style="width:auto;height:auto" data-day="${i + 1}" ${w.days.includes(i + 1) ? 'checked' : ''}> ${n}</label>`).join('')}</div>` : ''}
         <label style="margin-top:12px"><input id="catch" type="checkbox" style="width:auto;height:auto" ${w.catch_up ? 'checked' : ''}> Run at the next opportunity if the Mac was asleep</label>`,
-      `<h1>A few options</h1><label>Skip files larger than (GB, blank for no limit)</label><input id="max" type="number" min="1" value="${esc(w.max_gb)}">${excludeEditor(w.excludes)}<div class="card">Files you delete on this Mac stay on the NAS. The app lists them and nothing is removed until you confirm.</div>`,
+      `<h1>A few options</h1><label>Skip files larger than (GB, blank for no limit)</label><input id="max" type="number" min="1" value="${esc(w.max_gb)}"><label>Alert me if there is no successful backup for this many days (blank for no alert)</label><input id="alertdays" type="number" min="1" value="${esc(w.alert_days)}">${excludeEditor(w.excludes)}<div class="card">Files you delete on this Mac stay on the NAS. The app lists them and nothing is removed until you confirm.</div>`,
       `<h1>Ready to start</h1><label>Name</label><input id="name" value="${esc(w.name || w.folders.map(f => base(f)).join(', '))}"><div class="card">${w.folders.map(f => `<div class="mono">${esc(f)} → ${esc(destOf(f))}</div>`).join('')}<div class="sub" style="margin-top:6px">Destination: ${esc(w.dest_root)} · ${schedText(wizardSchedule(w))}</div></div><label><input id="first" type="checkbox" style="width:auto;height:auto" checked> Start the first backup now</label>`,
     ][step];
     d.innerHTML = `<div class="steps">${names.map((n, i) => i === step ? `<b>${i + 1} ${n}</b>` : `<span>${i + 1} ${n}</span>`).join('<span>›</span>')}</div>${body}<div class="err">${esc(error)}</div>
@@ -499,6 +500,7 @@ function wizard(suggested = '') {
     if (d.querySelector('[data-day]')) w.days = [...d.querySelectorAll('[data-day]:checked')].map(c => +c.dataset.day);
     if (v('catch')) w.catch_up = v('catch').checked;
     if (v('max')) w.max_gb = v('max').value;
+    if (v('alertdays')) w.alert_days = v('alertdays').value;
     if (v('excl')) w.excludes = v('excl').value;
     if (v('name')) w.name = v('name').value;
   }
@@ -515,7 +517,7 @@ function wizard(suggested = '') {
     if (error) return draw();
     if (step < 4) { step++; return draw(); }
     const schedule = wizardSchedule(w);
-    const job = { id: 0, name: w.name || 'Backup', dest_root: w.dest_root, schedule, paused: false, catch_up: w.catch_up, exclude_names: parsePatterns(w.excludes), max_file_bytes: w.max_gb ? Math.round(+w.max_gb * 1e9) : null,
+    const job = { id: 0, name: w.name || 'Backup', dest_root: w.dest_root, schedule, paused: false, catch_up: w.catch_up, exclude_names: parsePatterns(w.excludes), max_file_bytes: w.max_gb ? Math.round(+w.max_gb * 1e9) : null, alert_after_days: w.alert_days ? Math.max(1, Math.round(+w.alert_days)) : null,
       folders: w.folders.map(f => ({ source: f, dest: destOf(f) })) };
     try { const r = await call('save_job', { job }); if ($('#first', d).checked) await call('run_job', { job_id: r.job_id }); d.close(); render(); } catch (e) { error = String(e); draw(); }
   }

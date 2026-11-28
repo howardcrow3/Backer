@@ -47,7 +47,7 @@ fn excludes_on_a_tree_of_over_100k_files() {
     let store = Store::open_memory().unwrap();
     let mut job = Job { id: 0, name: "big".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/Code".into() }],
         dest_root: d.path().to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true,
-        exclude_names: vec!["*.tmp".into(), "node_modules/".into()], max_file_bytes: None };
+        exclude_names: vec!["*.tmp".into(), "node_modules/".into()], max_file_bytes: None, alert_after_days: None };
     store.save_job(&mut job).unwrap();
 
     let t = Instant::now();

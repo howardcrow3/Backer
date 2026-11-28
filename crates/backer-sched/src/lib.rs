@@ -175,7 +175,7 @@ mod tests {
         s.parse().unwrap()
     }
     fn job(s: Schedule) -> Job {
-        Job { id: 1, name: "j".into(), folders: vec![], dest_root: "/".into(), schedule: s, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None }
+        Job { id: 1, name: "j".into(), folders: vec![], dest_root: "/".into(), schedule: s, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 pub mod approvals;
 pub mod bookmarks;
 pub mod bridge;
+pub mod integrity;
 pub mod ipc;
 pub mod licensing;
 pub mod machine;
@@ -62,6 +63,7 @@ pub struct Agent {
     new_job_request: Mutex<Option<String>>,
     pub licensing: licensing::Licensing,
     restores: restore::Restores,
+    integrity: integrity::Integrity,
     /// FR-18: how long to wait for an unreachable NAS before a run is marked failed.
     retry: retry::RetryPolicy,
     notifier: Arc<dyn notify::Notifier>,
@@ -86,8 +88,9 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default(), changes: Default::default(), watchers: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: false, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: secrets::os_store(), host_keys, retry: retry::RetryPolicy::default(), notifier, restores: Default::default(), integrity: Default::default(), changes: Default::default(), watchers: Default::default() });
         a.store()?.recover_interrupted(now_ts().as_second())?;
+        a.store()?.recover_interrupted_verifications(now_ts().as_second())?;
         Ok(a)
     }
     /// Test agent: runs synchronously, retries without waiting, shows no notifications.
@@ -100,7 +103,7 @@ impl Agent {
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
-        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default(), changes: Default::default(), watchers: Default::default() });
+        let a = Arc::new(Self { db_path, tz, state: Mutex::new(Running::default()), approvals, sync_runs: true, quit: AtomicBool::new(false), new_job_request: Mutex::new(None), licensing: licensing::Licensing::load(license_path, now_ts().as_second()), secrets: Box::new(secrets::MemorySecrets::default()), host_keys, retry, notifier, restores: Default::default(), integrity: Default::default(), changes: Default::default(), watchers: Default::default() });
         a.store()?;
         Ok(a)
     }
@@ -229,6 +232,10 @@ impl Agent {
 
     /// Called every 30 s and after wake. Starts every due job.
     pub fn tick(self: &Arc<Self>, now: Timestamp) -> Result<Vec<JobId>> {
+        // Before the licence gate: an expired licence is one way a schedule fails silently.
+        let _ = self.check_missed_backups(now.as_second());
+        // Checking the NAS copies only reads, so it keeps going after the trial ends.
+        self.verify_tick(now)?;
         if !self.licensing.may_back_up(now.as_second()) {
             return Ok(vec![]);
         }
@@ -312,6 +319,32 @@ impl Agent {
         self.changes.lock().unwrap().is_pending(id)
     }
 
+    /// Raises a notification for each job that has gone `alert_after_days` without a successful backup.
+    /// Repeats at most once a day until the job succeeds again. Best effort.
+    pub fn check_missed_backups(&self, now: i64) -> Result<()> {
+        let store = self.store()?;
+        for job in store.list_jobs()? {
+            let Some(days) = job.alert_after_days.filter(|d| *d > 0) else { continue };
+            let overdue = !job.paused && missed_since(store.last_success(job.id)?.or(store.first_run_started(job.id)?), now, days);
+            match overdue {
+                false => {
+                    if store.missed_alert_at(job.id)?.is_some() {
+                        store.set_missed_alert(job.id, None)?;
+                    }
+                }
+                true => {
+                    if store.missed_alert_at(job.id)?.is_some_and(|t| now - t < DAY_SECS) {
+                        continue;
+                    }
+                    let (title, body) = missed_notice(&job, store.last_success(job.id)?, now, days);
+                    self.notifier.notify(&title, &body);
+                    store.set_missed_alert(job.id, Some(now))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn job_json(&self, store: &Store, job: &Job) -> Result<Value> {
         let last = store.last_run_started(job.id)?;
         let last_ts = last.and_then(|s| Timestamp::from_second(s).ok());
@@ -320,6 +353,7 @@ impl Agent {
         Ok(json!({
             "job": job, "running": self.is_running(job.id), "next_run": next, "last_run": last_run,
             "pending_deleted": store.list_deleted(Some(job.id))?.len(),
+            "integrity": self.integrity_json(store, job)?,
         }))
     }
 
@@ -358,6 +392,22 @@ impl Agent {
     pub(crate) fn require_job(&self, store: &Store, id: JobId) -> std::result::Result<Job, String> {
         store.get_job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))
     }
+}
+
+const DAY_SECS: i64 = 86_400;
+
+/// True when the job is overdue: its last success (or first attempt) is `days` or more in the past.
+fn missed_since(reference: Option<i64>, now: i64, days: u32) -> bool {
+    reference.is_some_and(|r| now - r >= i64::from(days) * DAY_SECS)
+}
+
+fn missed_notice(job: &Job, last_success: Option<i64>, now: i64, days: u32) -> (String, String) {
+    let title = format!("\"{}\" has not backed up", job.name);
+    let body = match last_success {
+        Some(t) => format!("No successful backup in {} days (alert threshold: {days}). Open Backer to see what is wrong.", ((now - t) / DAY_SECS).max(i64::from(days))),
+        None => format!("This job has never completed a successful backup and was first tried over {days} days ago. Open Backer to see what is wrong."),
+    };
+    (title, body)
 }
 
 /// Spec 8.3: a failed run raises a notification by default. A run the user stopped does not.
@@ -482,6 +532,11 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "deactivate_license" => agent.licensing.deactivate(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "retry_activation" => agent.licensing.retry(now_ts().as_second()).map(|_| agent.licensing.json(now_ts().as_second())),
             "verify_job" => agent.verify_job(need()?),
+            "start_verification" => agent.start_verification(need()?, Trigger::Manual).map(|s| json!({"started": s == integrity::VerifyStart::Started})),
+            "verification_status" => Ok(agent.verification_status()),
+            "cancel_verification" => Ok(json!({"cancelled": agent.cancel_verification()})),
+            "list_verifications" => agent.list_verifications(need()?, p.get("limit").and_then(Value::as_u64).unwrap_or(10) as u32),
+            "set_verify_schedule" => serde_json::from_value::<Schedule>(p.get("schedule").cloned().unwrap_or(Value::Null)).map_err(|e| format!("bad schedule: {e}")).and_then(|s| agent.set_verify_schedule(need()?, s)),
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
@@ -560,7 +615,7 @@ mod tests {
         assert_eq!(ui("init_destination", json!({"path": dst})) ["ok"], true);
         assert_eq!(ui("check_destination", json!({"path": dst}))["result"]["ready"], true);
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         T { _t: t, src, dst, agent, id }
     }
@@ -706,7 +761,7 @@ mod tests {
         assert_eq!(ui("license_status", json!({}))["result"]["state"], "expired");
         ui("init_destination", json!({"path": dst}));
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Daily { hour: 2, minute: 0 }, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         // Starting is refused with a message people can act on, from the app and from an assistant alike.
         let msg = ui("run_job", json!({"job_id": id}))["error"].as_str().unwrap().to_string();
@@ -808,7 +863,7 @@ mod restore_tests {
         let ui = |m: &str, p: Value| handle_ui(&agent, &json!({"method": m, "params": p}));
         ui("init_destination", json!({"path": dst}));
         let job = Job { id: 0, name: "j".into(), folders: vec![FolderPair { source: src.to_string_lossy().into(), dest: "mac/src".into() }],
-            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None };
+            dest_root: dst.to_string_lossy().into(), schedule: Schedule::Manual, paused: false, catch_up: true, exclude_names: vec![], max_file_bytes: None, alert_after_days: None };
         let id = ui("save_job", json!({"job": job}))["result"]["job_id"].as_i64().unwrap();
         agent.start_job(id).unwrap();
         (t, src, agent, id)
