@@ -67,7 +67,8 @@ async function showLicense() {
   let l; try { l = await call('license_status'); } catch { return; }
   trialIndicator(l);
   let b = $('#lic');
-  const show = l.state === 'expired' || l.problem || (l.state === 'trial' && l.days_left <= 5) || (l.state === 'grace' && l.days_left <= 7);
+  // The trial countdown lives in the account pill and its menu; the banner is only for things that need action.
+  const show = l.state === 'expired' || l.problem || (l.state === 'grace' && l.days_left <= 7);
   if (!show) { if (b) b.remove(); return; }
   if (!b) { b = document.createElement('div'); b.id = 'lic'; b.className = 'banner'; document.body.prepend(b); }
   if (l.state === 'grace') { b.innerHTML = `<span>Backer hasn’t been able to confirm your license key online yet. Backups keep running for ${l.days_left} more day${l.days_left === 1 ? '' : 's'}. Connect to the internet to finish.</span> <button data-retry>Try again</button>`; return; }
@@ -75,14 +76,16 @@ async function showLicense() {
   b.innerHTML = `<span>${l.state === 'expired' ? 'Your free trial has ended, so backups are paused. Your backed-up files and history are untouched.' : `Your free trial ends in ${l.days_left} day${l.days_left === 1 ? '' : 's'}.`}</span> <button class="pri" data-buy>Buy Backer</button> <button data-go="settings">Enter a key</button>`;
 }
 
-// Always-visible trial indicator at the bottom of the left navigation. Hidden once a key is entered.
+// Trial and license status in the account pill (second line) and the license block at the top of its menu.
 function trialIndicator(l) {
-  const t = $('#trial'); if (!t) return;
-  if (l.state === 'licensed' || l.state === 'grace') { t.hidden = true; return; }
-  const ended = l.state === 'expired';
-  const text = ended ? 'Trial ended' : `${l.days_left} day${l.days_left === 1 ? '' : 's'} left in trial`;
-  t.className = 'trial' + (ended ? ' ended' : l.days_left <= 5 ? ' soon' : '');
-  t.innerHTML = `<div class="t-days">${text}</div><button class="pri" data-buy>Buy now</button>`;
+  const t = $('#trial'), p = $('#pill-lic'); if (!t || !p) return;
+  if (l.store || l.state === 'licensed' || l.state === 'grace') { t.hidden = true; p.textContent = l.state === 'grace' ? 'Confirming license' : 'Licensed'; p.className = 's'; return; }
+  const ended = l.state === 'expired', soon = !ended && l.days_left <= 5;
+  const left = `${l.days_left} day${l.days_left === 1 ? '' : 's'} left`;
+  p.textContent = ended ? 'Trial ended · paused' : `Trial · ${left}`;
+  p.className = 's' + (ended ? ' ended' : soon ? ' soon' : '');
+  t.className = 'lic' + (ended ? ' ended' : '');
+  t.innerHTML = `<div class="t-days">${ended ? 'Your free trial has ended' : `Free trial · ${left}`}</div><div class="t-sub">${ended ? 'Backups are paused until you enter a license key.' : 'Everything works during the trial.'}</div><button class="pri" data-buy>Buy Backer</button><button data-go="settings" data-sec="license">Enter a key</button>`;
   t.hidden = false;
 }
 
@@ -105,7 +108,7 @@ async function showUpdate(force = false) {
 async function appVersion() { try { return await T.app.getVersion(); } catch { return ''; } }
 
 function licenseHtml(l) {
-  if (l.store) return `<h2>License</h2><div class="card"><span class="pill ok">Purchased</span> Bought in the Mac App Store. Thank you for buying Backer.</div>`;
+  if (l.store) return `<h2 id="s-license">License</h2><div class="card"><span class="pill ok">Purchased</span> Bought in the Mac App Store. Thank you for buying Backer.</div>`;
   const has = l.state === 'licensed' || l.state === 'grace';
   const status = l.state === 'licensed' ? `<span class="pill ok">Licensed</span> Registered to ${esc(l.email)}. Thank you for buying Backer. One key works on 2 computers.`
     : l.state === 'grace' ? `<span class="pill warn">Confirming</span> Registered to ${esc(l.email)}. Backer couldn’t reach the license server to confirm this computer yet. Backups keep running, and it keeps trying. ${l.days_left} day${l.days_left === 1 ? '' : 's'} left to confirm.`
@@ -114,7 +117,7 @@ function licenseHtml(l) {
   const problem = l.problem ? `<div class="card"><span class="pill bad-p">Key not active</span> ${esc(l.problem)}</div><div class="row"><button class="pri" data-retry>Try again</button></div>` : '';
   const manage = has ? `<div class="sub">Moving to a new computer? Deactivate this one first, then enter the key on the new one. A computer you can no longer reach can be removed at turtlebox.studio/account.</div>
     <div class="row">${l.state === 'grace' ? '<button data-retry>Try again</button>' : ''}<button data-deactivate>Deactivate this computer</button></div>` : '';
-  return `<h2>License</h2><div class="card">${status}</div>${problem}${manage}
+  return `<h2 id="s-license">License</h2><div class="card">${status}</div>${problem}${manage}
     ${has ? '' : `<div class="sub">Paste the key from your purchase email.</div>
     <textarea id="lickey" rows="3" class="mono" style="width:100%" placeholder="BACKER-XXXXX-XXXXX-…"></textarea>
     <div class="row"><button class="pri" data-activate>Activate</button><button data-buy>Buy Backer</button></div>`}`;
@@ -407,7 +410,7 @@ async function renderSettings() {
   await editionReady;
   if (STORE) {
     const lic = await call('license_status');
-    $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>Start at login</h2><div class="card"><label><input type="checkbox" id="loginitem"> Start Backer when I log in</label> <span id="loginnote" class="sub"></span></div><div class="sub">Scheduled backups run while Backer is running in the menu bar.</div><h2>About</h2><div class="card">Backer ${esc(await appVersion())}. Updates come through the Mac App Store.</div>`;
+    $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2 id="s-login">Start at login</h2><div class="card"><label><input type="checkbox" id="loginitem"> Start Backer when I log in</label> <span id="loginnote" class="sub"></span></div><div class="sub">Scheduled backups run while Backer is running in the menu bar.</div><h2>About</h2><div class="card">Backer ${esc(await appVersion())}. Updates come through the Mac App Store.</div>`;
     const cb = $('#loginitem'), note = $('#loginnote');
     const show = st => { cb.checked = st === 'on' || st === 'approval'; note.textContent = st === 'approval' ? 'Allow Backer in System Settings, General, Login Items.' : ''; };
     try { show(await T.core.invoke('login_item')); } catch { cb.disabled = true; }
@@ -417,7 +420,7 @@ async function renderSettings() {
   const clients = await call('list_mcp_clients');
   const cfg = await T.core.invoke('mcp_config').catch(() => '');
   const lic = await call('license_status');
-  $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2>Updates</h2><div class="card">Backer ${esc(await appVersion())}</div><div class="row"><button data-checkupdate>Check for updates</button></div><h2>AI assistants (MCP)</h2>
+  $('#main').innerHTML = `<h1>Settings</h1>${licenseHtml(lic)}<h2 id="s-updates">Updates</h2><div class="card">Backer ${esc(await appVersion())}</div><div class="row"><button data-checkupdate>Check for updates</button></div><h2 id="s-assistants">AI assistants (MCP)</h2>
     <div class="sub">Approved assistants can see jobs, run them, pause them, change schedules and delete a whole job (they must give its exact name), and ask you to set up a new job (you choose the folders, NAS and times). They cannot delete files from the NAS, or choose or change folders or destinations.</div>
     ${clients.length ? `<table><thead><tr><th>Program</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody>${clients.map(c => `<tr><td>${esc(c.client.name)}<div class="mono" style="color:var(--ink-muted)">${esc(c.identity.slice(0, 60))}</div></td><td>${c.client.approved ? '<span class="pill ok">Approved</span>' : '<span class="pill warn">Waiting for you</span>'}</td><td>${fmtTime(c.client.last_used)}</td>
       <td style="text-align:right">${c.client.approved ? '' : `<button class="pri" data-approve="${esc(c.identity)}">Allow</button> `}<button data-revoke="${esc(c.identity)}">${c.client.approved ? 'Revoke' : 'Deny'}</button></td></tr>`).join('')}</tbody></table>` : '<div class="card">No assistant has tried to connect.</div>'}
@@ -640,6 +643,11 @@ function applyTheme(t) {
 let savedTheme = 'system'; try { savedTheme = localStorage.getItem(THEME_KEY) || 'system'; } catch {}
 applyTheme(savedTheme);
 const menu = $('#menu'), acct = $('#acct');
+// Every settings section is one row in the menu; each opens Settings scrolled to that section.
+const sectionsFor = () => (STORE ? [['license', 'License'], ['login', 'Start at login']] : [['license', 'License'], ['updates', 'Updates'], ['assistants', 'AI assistants (MCP)']]);
+editionReady.then(() => { $('#sections').innerHTML = sectionsFor().map(([id, label]) => `<a href="#settings" data-v="settings" data-sec="${id}" role="menuitem">${label}</a>`).join(''); $('#sections').querySelectorAll('a').forEach(a => a.addEventListener('click', e => goNav(a, e))); });
+const goNav = (a, e) => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; browse = null; render().then(() => { if (a.dataset.sec) document.getElementById('s-' + a.dataset.sec)?.scrollIntoView(); }); };
+document.querySelectorAll('nav a:not(#fb-nav)').forEach(a => a.addEventListener('click', e => goNav(a, e)));
 const setMenu = open => { menu.hidden = !open; acct.setAttribute('aria-expanded', String(open)); };
 acct.addEventListener('click', e => { e.stopPropagation(); setMenu(menu.hidden); });
 document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('#menu')) setMenu(false); });
@@ -647,9 +655,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !menu.hidd
 menu.addEventListener('click', e => {
   const b = e.target.closest('[data-theme-set]');
   if (b) { applyTheme(b.dataset.themeSet); try { localStorage.setItem(THEME_KEY, b.dataset.themeSet); } catch {} return; }
-  if (e.target.closest('a')) setMenu(false);
+  if (e.target.closest('a,[data-buy],[data-go]')) setMenu(false);
 });
-document.querySelectorAll('nav a:not(#fb-nav)').forEach(a => a.addEventListener('click', e => { e.preventDefault(); view = a.dataset.v || 'jobs'; detailId = null; runId = null; browse = null; render(); }));
 render(); timer = setInterval(() => { if (!$('#dlg').open && !browse && (!runId || runLive) && document.activeElement?.id !== 'q') render(); }, 3000);
 // A backer://activate link from the purchase email was opened: the app already tried the key, so say what happened.
 T.event.listen('license-link', e => { toast(e.payload.message, !e.payload.ok); render(); });
