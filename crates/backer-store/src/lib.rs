@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS deleted (
   job_id INTEGER NOT NULL, dest_path TEXT NOT NULL, size INTEGER NOT NULL, detected INTEGER NOT NULL,
   PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS missed_alerts (job_id INTEGER PRIMARY KEY, alerted INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS last_paused (job_id INTEGER PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kept (job_id INTEGER NOT NULL, dest_path TEXT NOT NULL, PRIMARY KEY (job_id, dest_path)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS verifications (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, started INTEGER NOT NULL, finished INTEGER,
@@ -90,7 +91,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction().map_err(se)?;
         tx.execute("DELETE FROM run_log WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
         tx.execute("DELETE FROM run_folders WHERE run_id IN (SELECT id FROM runs WHERE job_id=?1)", [id]).map_err(se)?;
-        for t in ["runs", "files", "deleted", "kept", "missed_alerts", "verifications", "verify_schedules"] {
+        for t in ["runs", "files", "deleted", "kept", "missed_alerts", "last_paused", "verifications", "verify_schedules"] {
             tx.execute(&format!("DELETE FROM {t} WHERE job_id=?1"), [id]).map_err(se)?;
         }
         tx.execute("DELETE FROM jobs WHERE id=?1", [id]).map_err(se)?;
@@ -153,6 +154,14 @@ impl Store {
     /// When the job's first run started. The baseline for a job that has never succeeded.
     pub fn first_run_started(&self, job_id: JobId) -> Result<Option<i64>> {
         self.conn.query_row("SELECT MIN(started) FROM runs WHERE job_id=?1", [job_id], |r| r.get(0)).map_err(se)
+    }
+    /// The last time the job was seen paused. The missed-backup clock restarts from here when it is resumed.
+    pub fn last_paused(&self, job_id: JobId) -> Result<Option<i64>> {
+        self.conn.query_row("SELECT at FROM last_paused WHERE job_id=?1", [job_id], |r| r.get(0)).optional().map_err(se)
+    }
+    pub fn set_last_paused(&self, job_id: JobId, at: i64) -> Result<()> {
+        self.conn.execute("INSERT INTO last_paused(job_id,at) VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET at=MAX(at,?2)", params![job_id, at]).map_err(se)?;
+        Ok(())
     }
     /// When a missed-backup alert was last raised for the job, if one is outstanding.
     pub fn missed_alert_at(&self, job_id: JobId) -> Result<Option<i64>> {

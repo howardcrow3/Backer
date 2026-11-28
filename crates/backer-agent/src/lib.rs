@@ -325,7 +325,17 @@ impl Agent {
         let store = self.store()?;
         for job in store.list_jobs()? {
             let Some(days) = job.alert_after_days.filter(|d| *d > 0) else { continue };
-            let overdue = !job.paused && missed_since(store.last_success(job.id)?.or(store.first_run_started(job.id)?), now, days);
+            if job.paused {
+                // A paused job is not missing backups. Remember when it was last paused, so that after it is
+                // resumed the clock counts from then rather than from a success weeks before the pause.
+                store.set_last_paused(job.id, now)?;
+            }
+            let reference = store.last_success(job.id)?.or(store.first_run_started(job.id)?);
+            let reference = match (reference, store.last_paused(job.id)?) {
+                (Some(r), Some(p)) => Some(r.max(p)),
+                (r, _) => r,
+            };
+            let overdue = !job.paused && missed_since(reference, now, days);
             match overdue {
                 false => {
                     if store.missed_alert_at(job.id)?.is_some() {
@@ -502,8 +512,13 @@ impl Control for AgentControl {
 fn set_paused(a: &Arc<Agent>, id: JobId, p: bool) -> std::result::Result<Value, String> {
     let s = a.store().map_err(es)?;
     let mut j = a.require_job(&s, id)?;
+    let was_paused = j.paused;
     j.paused = p;
     s.save_job(&mut j).map_err(es)?;
+    if was_paused || p {
+        // Restart the missed-backup clock on resume (and note the pause straight away).
+        s.set_last_paused(id, now_ts().as_second()).map_err(es)?;
+    }
     Ok(json!({"ok": true}))
 }
 
