@@ -27,7 +27,7 @@ use backer_mcp::Control;
 use backer_store::Store;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -85,6 +85,7 @@ impl Agent {
         Self::new_with_notifier(db_path, tz, Arc::new(notify::SystemNotifier))
     }
     pub fn new_with_notifier(db_path: PathBuf, tz: TimeZone, notifier: Arc<dyn notify::Notifier>) -> Result<Arc<Self>> {
+        RUNNING_EXE.get_or_init(running_exe);
         let license_path = db_path.with_file_name("license.json");
         let approvals = approvals::Approvals::load(db_path.with_file_name("mcp-clients.json"));
         let host_keys = HostKeys::new(db_path.with_file_name("host-keys.json"));
@@ -522,6 +523,30 @@ fn set_paused(a: &Arc<Agent>, id: JobId, p: bool) -> std::result::Result<Value, 
     Ok(json!({"ok": true}))
 }
 
+/// The program file this process was started from, and its modification time then. Captured once at start, so a
+/// copy replaced on disk later (a new version dragged over the old one) no longer matches.
+static RUNNING_EXE: std::sync::OnceLock<Option<(PathBuf, std::time::SystemTime)>> = std::sync::OnceLock::new();
+
+fn running_exe() -> Option<(PathBuf, std::time::SystemTime)> {
+    let exe = std::env::current_exe().ok()?;
+    file_identity(&exe)
+}
+
+fn file_identity(p: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
+    let p = p.canonicalize().ok()?;
+    let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+    Some((p, modified))
+}
+
+/// Is this agent process running the program file at `expected` as it is on disk now? The app asks at start and
+/// restarts an agent left over from an older install, which would not know newer methods.
+pub fn runs_program(running: Option<&(PathBuf, std::time::SystemTime)>, expected: &Path) -> bool {
+    match (running, file_identity(expected)) {
+        (Some(r), Some(e)) => *r == e,
+        _ => false,
+    }
+}
+
 /// Full API for the signed app (ui.sock). One JSON object in, one out.
 pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -552,6 +577,10 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
             "cancel_verification" => Ok(json!({"cancelled": agent.cancel_verification()})),
             "list_verifications" => agent.list_verifications(need()?, p.get("limit").and_then(Value::as_u64).unwrap_or(10) as u32),
             "set_verify_schedule" => serde_json::from_value::<Schedule>(p.get("schedule").cloned().unwrap_or(Value::Null)).map_err(|e| format!("bad schedule: {e}")).and_then(|s| agent.set_verify_schedule(need()?, s)),
+            "agent_matches" => {
+                let exe = p.get("exe").and_then(Value::as_str).ok_or("exe required")?;
+                Ok(json!({"current": runs_program(RUNNING_EXE.get_or_init(running_exe).as_ref(), Path::new(exe))}))
+            }
             "new_job_request" => Ok(json!({"request": agent.new_job_request.lock().unwrap().clone()})),
             "dismiss_new_job_request" => { *agent.new_job_request.lock().unwrap() = None; Ok(json!({"ok": true})) }
             "cancel_job" => Ok(json!({"cancelled": agent.cancel_job(need()?)})),
@@ -605,6 +634,26 @@ pub fn handle_ui(agent: &Arc<Agent>, req: &Value) -> Value {
 
 fn paths(p: &Value) -> std::result::Result<Vec<String>, String> {
     Ok(p.get("paths").and_then(Value::as_array).ok_or("paths required")?.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+}
+
+#[cfg(test)]
+mod exe_tests {
+    use super::*;
+
+    #[test]
+    fn a_program_replaced_on_disk_no_longer_matches() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("backer-agent");
+        std::fs::write(&f, b"old").unwrap();
+        let running = file_identity(&f);
+        assert!(runs_program(running.as_ref(), &f));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::write(&f, b"new").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(later).unwrap();
+        assert!(!runs_program(running.as_ref(), &f), "a newer copy dragged over the old one");
+        assert!(!runs_program(running.as_ref(), &t.path().join("missing")));
+        assert!(!runs_program(None, &f));
+    }
 }
 
 #[cfg(test)]
