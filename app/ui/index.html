@@ -15,17 +15,19 @@
     <a href="#jobs" data-v="jobs">Jobs</a>
     <a href="#deleted" data-v="deleted">Deleted files <span id="badge" class="badge" hidden></span></a>
     <div class="grow"></div>
-    <div id="trial" class="trial" hidden></div>
     <div class="acct-wrap">
       <div id="menu" class="pop" role="menu" hidden>
-        <a href="#settings" data-v="settings" role="menuitem">Settings</a>
+        <div class="who-line" id="agent">Checking…</div>
+        <div id="trial" class="lic" hidden></div>
+        <div class="grp">Settings</div>
+        <div id="sections"></div>
         <a href="#feedback" id="fb-nav" role="menuitem" hidden>Send feedback</a>
         <hr>
         <div class="theme" role="group" aria-label="Theme">
           <button data-theme-set="system" aria-pressed="true">System</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="dark" aria-pressed="false">Dark</button>
         </div>
       </div>
-      <button id="acct" class="acct" aria-haspopup="menu" aria-expanded="false"><span class="av" aria-hidden="true">B</span><span class="who"><span class="n">Backer</span><span class="s" id="agent">Checking…</span></span></button>
+      <button id="acct" class="acct" aria-haspopup="menu" aria-expanded="false"><span class="av" aria-hidden="true">B</span><span class="who"><span class="n">Backer</span><span class="s" id="pill-lic"></span></span></button>
     </div>
   </nav>
   <main id="main"></main>
