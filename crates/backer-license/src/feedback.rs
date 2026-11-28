@@ -1,37 +1,53 @@
-//! Signing for the High Turtle feedback service (`https://feedback.turtlebox.studio/v1/feedback`).
+//! Signing for the High Turtle feedback service (`https://feedback.turtlebox.studio/v1/feedback`,
+//! see docs/FEEDBACK_API.md).
 //!
-//! Each request carries `x-ht-app`, `x-ht-timestamp` (unix seconds) and `x-ht-signature`: hex
-//! HMAC-SHA256 with this app's key over `"<timestamp>.<raw body>"`. The key is compiled in from the
-//! `FEEDBACK_KEY` build variable (a GitHub Actions secret), never committed. See
-//! howardcrow3/highturtle `feedback/README.md` for the service side.
+//! There is no secret in the app. Each install makes its own Ed25519 key the first time it sends
+//! feedback and keeps it in the OS keychain (the app shell does that). Every request carries
+//! `x-ht-install` (the public key, hex), `x-ht-timestamp` (unix seconds) and `x-ht-signature` (hex
+//! Ed25519 signature over [`signing_input`]).
 
-use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signer, SigningKey};
 
 pub const FEEDBACK_URL: &str = "https://feedback.turtlebox.studio/v1/feedback";
 pub const APP_ID: &str = "backer";
 
-/// Plain HMAC-SHA256 (RFC 2104), hex encoded.
-pub fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        k[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = Sha256::new();
-    inner.update(k.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>());
-    inner.update(msg);
-    let mut outer = Sha256::new();
-    outer.update(k.iter().map(|b| b ^ 0x5c).collect::<Vec<u8>>());
-    outer.update(inner.finalize());
-    data_encoding::HEXLOWER.encode(&outer.finalize())
+fn hex(bytes: &[u8]) -> String {
+    data_encoding::HEXLOWER.encode(bytes)
 }
 
-/// The signature header value for one request. `key_hex` is the app key as stored by the service.
-pub fn sign(key_hex: &str, timestamp: i64, body: &str) -> Option<String> {
-    let key = data_encoding::HEXLOWER_PERMISSIVE.decode(key_hex.trim().as_bytes()).ok()?;
-    Some(hmac_sha256_hex(&key, format!("{timestamp}.{body}").as_bytes()))
+/// The exact text that is signed: app id, install id, timestamp and the raw body, so a signature
+/// cannot be reused for another app, another install, another moment or another message.
+pub fn signing_input(install: &str, timestamp: i64, body: &str) -> String {
+    format!("{APP_ID}.{install}.{timestamp}.{body}")
+}
+
+/// `(install id, signature)` for one request, both hex.
+pub fn sign(key: &SigningKey, timestamp: i64, body: &str) -> (String, String) {
+    let install = hex(key.verifying_key().as_bytes());
+    let sig = key.sign(signing_input(&install, timestamp, body).as_bytes());
+    (install, hex(&sig.to_bytes()))
+}
+
+/// A fresh install key. If the system random source fails (not expected) a time based seed is
+/// used rather than losing feedback; it only identifies the install to the service.
+pub fn new_key() -> SigningKey {
+    let mut seed = [0u8; 32];
+    if getrandom::fill(&mut seed).is_err() {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        seed[..16].copy_from_slice(&t.to_le_bytes());
+    }
+    SigningKey::from_bytes(&seed)
+}
+
+/// Hex form of a key's 32-byte seed, for the keychain.
+pub fn key_to_hex(key: &SigningKey) -> String {
+    hex(&key.to_bytes())
+}
+
+/// A key from its saved hex seed; `None` for anything that is not exactly 64 hex characters.
+pub fn key_from_hex(s: &str) -> Option<SigningKey> {
+    let seed: [u8; 32] = data_encoding::HEXLOWER_PERMISSIVE.decode(s.trim().as_bytes()).ok()?.try_into().ok()?;
+    Some(SigningKey::from_bytes(&seed))
 }
 
 /// A sensible-looking email address, matching the service's own check: one `@`, no spaces, a dotted domain
@@ -95,25 +111,49 @@ pub fn body(rating: Option<u8>, message: &str, category: Option<&str>, email: Op
 mod tests {
     use super::*;
 
-    #[test]
-    fn hmac_matches_rfc4231() {
-        // RFC 4231 test case 2.
-        assert_eq!(hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-        // Test case 6: a key longer than the block size.
-        assert_eq!(
-            hmac_sha256_hex(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First"),
-            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
-        );
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
     }
 
     #[test]
-    fn signature_matches_the_service() {
-        // Same inputs as the service's JS signer: HMAC(hex-decoded key, "ts.body").
-        let key = "ab".repeat(32);
-        let sig = sign(&key, 1_795_694_400, r#"{"app":"backer","rating":5}"#).unwrap();
-        // Value computed by the service's own signer (feedback/src/core.mjs signBody) for these inputs.
-        assert_eq!(sig, "d2523b2c438bb71b1a763eaf45b3eeea2041afaf961bdf15c202c045455d54df");
-        assert!(sign("not hex", 1, "{}").is_none());
+    fn a_request_is_signed_by_the_install_key_and_verifies() {
+        use ed25519_dalek::{Signature, Verifier};
+        let k = key(7);
+        let body = r#"{"app":"backer","rating":5}"#;
+        let (install, sig) = sign(&k, 1_795_694_400, body);
+        // The install id is the public key, so the service needs no shared secret to check it.
+        assert_eq!(install, hex(k.verifying_key().as_bytes()));
+        let sig_bytes: [u8; 64] = data_encoding::HEXLOWER.decode(sig.as_bytes()).unwrap().try_into().unwrap();
+        let sig = Signature::from_bytes(&sig_bytes);
+        let msg = signing_input(&install, 1_795_694_400, body);
+        assert_eq!(msg, format!("backer.{install}.1795694400.{body}"));
+        assert!(k.verifying_key().verify(msg.as_bytes(), &sig).is_ok());
+        // Any change to the body, time or install breaks it.
+        for other in [
+            signing_input(&install, 1_795_694_401, body),
+            signing_input(&install, 1_795_694_400, r#"{"app":"backer","rating":1}"#),
+            signing_input("other", 1_795_694_400, body),
+        ] {
+            assert!(k.verifying_key().verify(other.as_bytes(), &sig).is_err());
+        }
+    }
+
+    #[test]
+    fn installs_have_different_ids_and_signing_is_deterministic() {
+        let (a, sa) = sign(&key(1), 10, "{}");
+        let (b, _) = sign(&key(2), 10, "{}");
+        assert_ne!(a, b);
+        assert_eq!(sign(&key(1), 10, "{}"), (a, sa));
+        assert_ne!(new_key().verifying_key().as_bytes(), new_key().verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn saved_keys_round_trip_and_junk_is_ignored() {
+        let k = key(9);
+        assert_eq!(key_from_hex(&key_to_hex(&k)).unwrap().to_bytes(), k.to_bytes());
+        assert!(key_from_hex("nope").is_none());
+        assert!(key_from_hex(&"zz".repeat(32)).is_none());
+        assert!(key_from_hex(&"ab".repeat(31)).is_none());
     }
 
     #[test]

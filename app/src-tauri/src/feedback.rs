@@ -1,10 +1,24 @@
 //! "Send feedback": signs the user's rating and text with this build's key and posts them to the High
 //! Turtle feedback service. Runs in the app (not the agent), so it works even when backups are stopped.
 
-use backer_license::feedback::{body, sign, FEEDBACK_URL};
+use backer_license::feedback::{body, new_key, sign, FEEDBACK_URL};
 
-/// Baked in at build time from the FEEDBACK_KEY secret. Local builds without it hide the form.
-const KEY: Option<&str> = option_env!("FEEDBACK_KEY");
+/// This install's signing key: read from the OS keychain, or made and saved on first use. If the
+/// keychain refuses, the key lasts only until the app closes, which still works but means the
+/// service sees a new install next time.
+fn install_key() -> ed25519_dalek::SigningKey {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Ok(entry) = keyring::Entry::new("studio.turtlebox.backer", "feedback-install-key") {
+        use backer_license::feedback::{key_from_hex, key_to_hex};
+        if let Some(k) = entry.get_password().ok().and_then(|h| key_from_hex(&h)) {
+            return k;
+        }
+        let k = new_key();
+        let _ = entry.set_password(&key_to_hex(&k));
+        return k;
+    }
+    new_key()
+}
 
 #[derive(serde::Deserialize)]
 pub struct Feedback {
@@ -19,22 +33,23 @@ pub struct Feedback {
 
 #[tauri::command]
 pub fn feedback_available() -> bool {
-    KEY.is_some_and(|k| !k.trim().is_empty())
+    // No build-time secret is needed: each install signs with its own key.
+    true
 }
 
 #[tauri::command]
 pub async fn send_feedback(feedback: Feedback) -> Result<serde_json::Value, String> {
-    let key = KEY.filter(|k| !k.trim().is_empty()).ok_or("Feedback isn't set up in this build of Backer.")?;
     let platform = if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
     let payload = body(feedback.rating, &feedback.message, feedback.category.as_deref(), feedback.email.as_deref(), feedback.anonymous, env!("CARGO_PKG_VERSION"), platform)?;
     tauri::async_runtime::spawn_blocking(move || {
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs() as i64;
-        let sig = sign(key, ts, &payload).ok_or("Feedback isn't set up correctly in this build of Backer.")?;
+        let (install, sig) = sign(&install_key(), ts, &payload);
         let agent = ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(8)).timeout(std::time::Duration::from_secs(20)).build();
         let res = agent
             .post(FEEDBACK_URL)
             .set("content-type", "application/json")
             .set("x-ht-app", backer_license::feedback::APP_ID)
+            .set("x-ht-install", &install)
             .set("x-ht-timestamp", &ts.to_string())
             .set("x-ht-signature", &sig)
             .send_string(&payload);
